@@ -498,17 +498,9 @@ class QwenImageLayeredPipelineConfig(QwenImageEditPipelineConfig):
         vae_scale_factor = self.get_vae_scale_factor()
 
         img_shapes = batch.img_shapes
-        # Determine if this is positive or negative prompt by comparing embeddings
-        # and use appropriate txt_seq_lens (from corresponding mask sum)
-        is_negative = prompt_embeds is batch.negative_prompt_embeds or (
-            hasattr(batch, "negative_prompt_embeds")
-            and len(batch.negative_prompt_embeds) > 0
-            and prompt_embeds[0] is batch.negative_prompt_embeds[0]
-        )
-        if is_negative and hasattr(batch, "negative_txt_seq_lens"):
-            txt_seq_lens = batch.negative_txt_seq_lens
-        else:
-            txt_seq_lens = batch.txt_seq_lens
+        # Use sequence length directly from the provided prompt_embeds
+        # This ensures correct txt_seq_lens for both positive and negative prompts
+        txt_seq_lens = [prompt_embeds[0].shape[1]]
 
         freqs_cis = QwenImageEditPlusPipelineConfig.get_freqs_cis(
             img_shapes, txt_seq_lens, rotary_emb, device, dtype
