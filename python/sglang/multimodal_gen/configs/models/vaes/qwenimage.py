@@ -51,3 +51,20 @@ class QwenImageVAEConfig(VAEConfig):
             len(self.arch_config.temperal_downsample)
         )
         self.arch_config.spatial_compression_ratio = self.arch_config.vae_scale_factor
+
+
+@dataclass
+class QwenImageLayeredVAEArchConfig(QwenImageVAEArchConfig):
+    """VAE config for Qwen-Image-Layered which uses RGBA (4 channels) input/output."""
+
+    input_channels: int = 4
+    out_channels: int = 4
+
+
+@dataclass
+class QwenImageLayeredVAEConfig(QwenImageVAEConfig):
+    """VAE config for Qwen-Image-Layered with 4-channel RGBA support."""
+
+    arch_config: QwenImageLayeredVAEArchConfig = field(
+        default_factory=QwenImageLayeredVAEArchConfig
+    )

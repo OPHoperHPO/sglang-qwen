@@ -11,7 +11,10 @@ from sglang.multimodal_gen.configs.models.dits.qwenimage import (
     QwenImageEditPlus_2511_DitConfig,
 )
 from sglang.multimodal_gen.configs.models.encoders.qwen_image import Qwen2_5VLConfig
-from sglang.multimodal_gen.configs.models.vaes.qwenimage import QwenImageVAEConfig
+from sglang.multimodal_gen.configs.models.vaes.qwenimage import (
+    QwenImageLayeredVAEConfig,
+    QwenImageVAEConfig,
+)
 from sglang.multimodal_gen.configs.pipeline_configs.base import (
     ImagePipelineConfig,
     ModelTaskType,
@@ -485,6 +488,10 @@ class QwenImageEditPlus_2511_PipelineConfig(QwenImageEditPlusPipelineConfig):
 class QwenImageLayeredPipelineConfig(QwenImageEditPipelineConfig):
     resolution: int = 640  # TODO: allow user to set resolution
     vae_precision: str = "bf16"
+    # Use RGBA VAE (4 channels) for Qwen-Image-Layered
+    vae_config: QwenImageLayeredVAEConfig = field(
+        default_factory=QwenImageLayeredVAEConfig
+    )
 
     def _prepare_edit_cond_kwargs(
         self, batch, prompt_embeds, rotary_emb, device, dtype
