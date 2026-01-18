@@ -463,7 +463,9 @@ class SamplingParams:
                 # Re-raise if it's not a safetensors file issue
                 raise
 
-        user_sampling_params = SamplingParams(*args, **kwargs)
+        # Use the same class as sampling_params to allow class-specific validation
+        # (e.g., QwenImageLayeredSamplingParams allows num_frames=0)
+        user_sampling_params = type(sampling_params)(*args, **kwargs)
         # TODO: refactor
         sampling_params._merge_with_user_params(user_sampling_params)
         sampling_params._adjust(server_args)
