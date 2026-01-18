@@ -447,8 +447,11 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
         image = image.to(dtype=torch.bfloat16)
 
         # Use user-provided prompt if available, otherwise auto-generate caption from image
-        if batch.prompt and isinstance(batch.prompt, str) and batch.prompt.strip():
-            prompt = batch.prompt
+        user_prompt = batch.prompt
+        if isinstance(user_prompt, list):
+            user_prompt = user_prompt[0] if user_prompt else None
+        if user_prompt and isinstance(user_prompt, str) and user_prompt.strip():
+            prompt = user_prompt
         else:
             prompt = self.get_image_caption(
                 prompt_image, use_en_prompt=use_en_prompt, device=device
