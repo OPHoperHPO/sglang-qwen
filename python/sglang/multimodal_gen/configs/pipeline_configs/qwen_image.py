@@ -565,7 +565,10 @@ class QwenImageLayeredPipelineConfig(QwenImageEditPipelineConfig):
             width,
         ) = self._unpad_and_unpack_latents(latents, batch)
         b, c, f, h, w = latents.shape
-        latents = latents[:, :, 1:]  # remove the first frame as it is the origin input
+        # Only remove the first frame (combined image) when generating multiple layers
+        # For layer_num=0 (num_frames=0), keep all frames as there's only the main output
+        if batch.num_frames > 0:
+            latents = latents[:, :, 1:]  # remove the first frame (combined image)
         latents = latents.permute(0, 2, 1, 3, 4).view(-1, c, 1, h, w)
         # latents = latents.reshape(batch_size, channels // (2 * 2), 1, height, width)
         return latents
