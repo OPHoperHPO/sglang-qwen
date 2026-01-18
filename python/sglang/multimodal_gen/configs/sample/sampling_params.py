@@ -759,10 +759,13 @@ class SamplingParams:
 
         # global switch: if True, allow overriding protected fields
         allow_override_protected = not user_params.no_override_protected_fields
+        # Use the actual class of user_params to get default values
+        # (supports subclasses like QwenImageLayeredSamplingParams)
+        user_params_class = type(user_params)
         for field in dataclasses.fields(user_params):
             field_name = field.name
             user_value = getattr(user_params, field_name)
-            default_class_value = getattr(SamplingParams, field_name)
+            default_class_value = getattr(user_params_class, field_name)
 
             # A field is considered user-modified if its value is different from the default
             is_user_modified = user_value != default_class_value
