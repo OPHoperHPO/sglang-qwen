@@ -18,6 +18,24 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 
+# Copied from DiffSynth-Studio FlowMatchScheduler._calculate_shift_qwen_image
+def calculate_shift_qwen_image(
+    image_seq_len: int,
+    base_seq_len: int = 256,
+    max_seq_len: int = 8192,
+    base_shift: float = 0.5,
+    max_shift: float = 0.9,
+) -> float:
+    """Calculate the mu parameter for Qwen-Image timestep shifting.
+
+    This matches DiffSynth-Studio's _calculate_shift_qwen_image function.
+    """
+    m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
+    b = base_shift - m * base_seq_len
+    mu = image_seq_len * m + b
+    return mu
+
+
 # Copied from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus.calculate_dimensions
 def calculate_dimensions(target_area, ratio):
     width = math.sqrt(target_area * ratio)
@@ -422,30 +440,40 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
         image = load_image(batch.image_path[0])
         image = image.convert("RGBA")
         image_size = image.size
-        resolution = 640  # TODO: support user-specified resolution
-        calculated_width, calculated_height = calculate_dimensions(
-            resolution * resolution, image_size[0] / image_size[1]
-        )
 
-        height = calculated_height
-        width = calculated_width
+        # Use user-specified height/width if available (must be divisible by 16),
+        # otherwise calculate from image aspect ratio with default resolution
+        multiple_of = self.vae_scale_factor * 2  # 16
+        if batch.height is not None and batch.width is not None:
+            # User-provided dimensions should already be divisible by 16
+            height = batch.height
+            width = batch.width
+        else:
+            # Calculate dimensions from image aspect ratio, then align to multiple_of
+            resolution = 640  # Default resolution
+            calculated_width, calculated_height = calculate_dimensions(
+                resolution * resolution, image_size[0] / image_size[1]
+            )
+            height = calculated_height // multiple_of * multiple_of
+            width = calculated_width // multiple_of * multiple_of
 
-        multiple_of = self.vae_scale_factor * 2
-        width = width // multiple_of * multiple_of
-        height = height // multiple_of * multiple_of
-
-        # if image is not None and not (isinstance(image, torch.Tensor) and image.size(1) == self.latent_channels):
-        image = self.image_processor.resize(image, calculated_height, calculated_width)
+        # Resize image to the target dimensions
+        image = self.image_processor.resize(image, height, width)
         prompt_image = image
-        image = self.image_processor.preprocess(
-            image, calculated_height, calculated_width
-        )
+        image = self.image_processor.preprocess(image, height, width)
         image = image.unsqueeze(2)
         image = image.to(dtype=torch.bfloat16)
 
-        prompt = self.get_image_caption(
-            prompt_image, use_en_prompt=use_en_prompt, device=device
-        )
+        # Use user-provided prompt if available, otherwise auto-generate caption from image
+        user_prompt = batch.prompt
+        if isinstance(user_prompt, list):
+            user_prompt = user_prompt[0] if user_prompt else None
+        if user_prompt and isinstance(user_prompt, str) and user_prompt.strip():
+            prompt = user_prompt
+        else:
+            prompt = self.get_image_caption(
+                prompt_image, use_en_prompt=use_en_prompt, device=device
+            )
 
         prompt_embeds, prompt_embeds_mask = self.encode_prompt(
             prompt=prompt,
@@ -481,17 +509,27 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
                 ],
                 (
                     1,
-                    calculated_height // self.vae_scale_factor // 2,
-                    calculated_width // self.vae_scale_factor // 2,
+                    height // self.vae_scale_factor // 2,
+                    width // self.vae_scale_factor // 2,
                 ),
             ]
         ]
 
         # 5. Prepare timesteps
+        # Calculate mu using DiffSynth-Studio's formula for Qwen-Image
+        # dynamic_shift_len = (height // 16) * (width // 16)
+        # Note: vae_scale_factor=8, so 8*2=16, hence height // self.vae_scale_factor // 2 = height // 16
+        dynamic_shift_len = (height // self.vae_scale_factor // 2) * (
+            width // self.vae_scale_factor // 2
+        )
+        mu = calculate_shift_qwen_image(
+            dynamic_shift_len,
+            base_seq_len=256,
+            max_seq_len=8192,
+            base_shift=0.5,
+            max_shift=0.9,
+        )
         sigmas = np.linspace(1.0, 0, num_inference_steps + 1)[:-1]
-        image_seq_len = latents.shape[1]
-        base_seqlen = 256 * 256 / 16 / 16
-        mu = (image_latents.shape[1] / base_seqlen) ** 0.5
         timesteps, num_inference_steps = retrieve_timesteps(
             self.scheduler,
             num_inference_steps,
@@ -525,5 +563,7 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
         batch.raw_latent_shape = latents.shape
         batch.txt_seq_lens = txt_seq_lens
         batch.img_shapes = img_shapes
+        batch.height = height
+        batch.width = width
 
         return batch

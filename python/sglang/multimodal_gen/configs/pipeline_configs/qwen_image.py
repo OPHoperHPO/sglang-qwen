@@ -11,7 +11,10 @@ from sglang.multimodal_gen.configs.models.dits.qwenimage import (
     QwenImageEditPlus_2511_DitConfig,
 )
 from sglang.multimodal_gen.configs.models.encoders.qwen_image import Qwen2_5VLConfig
-from sglang.multimodal_gen.configs.models.vaes.qwenimage import QwenImageVAEConfig
+from sglang.multimodal_gen.configs.models.vaes.qwenimage import (
+    QwenImageLayeredVAEConfig,
+    QwenImageVAEConfig,
+)
 from sglang.multimodal_gen.configs.pipeline_configs.base import (
     ImagePipelineConfig,
     ModelTaskType,
@@ -485,6 +488,10 @@ class QwenImageEditPlus_2511_PipelineConfig(QwenImageEditPlusPipelineConfig):
 class QwenImageLayeredPipelineConfig(QwenImageEditPipelineConfig):
     resolution: int = 640  # TODO: allow user to set resolution
     vae_precision: str = "bf16"
+    # Use RGBA VAE (4 channels) for Qwen-Image-Layered
+    vae_config: QwenImageLayeredVAEConfig = field(
+        default_factory=QwenImageLayeredVAEConfig
+    )
 
     def _prepare_edit_cond_kwargs(
         self, batch, prompt_embeds, rotary_emb, device, dtype
@@ -498,15 +505,23 @@ class QwenImageLayeredPipelineConfig(QwenImageEditPipelineConfig):
         vae_scale_factor = self.get_vae_scale_factor()
 
         img_shapes = batch.img_shapes
-        txt_seq_lens = batch.txt_seq_lens
+        # Use sequence length directly from the provided prompt_embeds
+        # This ensures correct txt_seq_lens for both positive and negative prompts
+        txt_seq_lens = [prompt_embeds[0].shape[1]]
 
         freqs_cis = QwenImageEditPlusPipelineConfig.get_freqs_cis(
             img_shapes, txt_seq_lens, rotary_emb, device, dtype
         )
 
         # perform sp shard on noisy image tokens
+        # noisy_img_seq_len = (layers + 1) * H * W
+        # where H = height // vae_scale_factor // 2 = height // 16 (vae_scale_factor=8)
+        # layers + 1 is the number of noise frames (matching DiffSynth's layer_num + 1)
+        layers = batch.num_frames
         noisy_img_seq_len = (
-            1 * (height // vae_scale_factor // 2) * (width // vae_scale_factor // 2)
+            (layers + 1)
+            * (height // vae_scale_factor // 2)
+            * (width // vae_scale_factor // 2)
         )
 
         img_cache, txt_cache = freqs_cis
@@ -556,7 +571,10 @@ class QwenImageLayeredPipelineConfig(QwenImageEditPipelineConfig):
             width,
         ) = self._unpad_and_unpack_latents(latents, batch)
         b, c, f, h, w = latents.shape
-        latents = latents[:, :, 1:]  # remove the first frame as it is the origin input
+        # Only remove the first frame (combined image) when generating multiple layers
+        # For layer_num=0 (num_frames=0), keep all frames as there's only the main output
+        if batch.num_frames > 0:
+            latents = latents[:, :, 1:]  # remove the first frame (combined image)
         latents = latents.permute(0, 2, 1, 3, 4).view(-1, c, 1, h, w)
         # latents = latents.reshape(batch_size, channels // (2 * 2), 1, height, width)
         return latents
