@@ -514,8 +514,9 @@ class QwenImageLayeredPipelineConfig(QwenImageEditPipelineConfig):
         )
 
         # perform sp shard on noisy image tokens
-        # noisy_img_seq_len = (layers + 1) * H * W where H = height//16, W = width//16
-        # layers + 1 is the number of noise frames (matching DiffSynth's layer_num calculation)
+        # noisy_img_seq_len = (layers + 1) * H * W
+        # where H = height // vae_scale_factor // 2 = height // 16 (vae_scale_factor=8)
+        # layers + 1 is the number of noise frames (matching DiffSynth's layer_num + 1)
         layers = batch.num_frames
         noisy_img_seq_len = (
             (layers + 1)
