@@ -422,24 +422,26 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
         image = load_image(batch.image_path[0])
         image = image.convert("RGBA")
         image_size = image.size
-        resolution = 640  # TODO: support user-specified resolution
-        calculated_width, calculated_height = calculate_dimensions(
-            resolution * resolution, image_size[0] / image_size[1]
-        )
 
-        height = calculated_height
-        width = calculated_width
-
-        multiple_of = self.vae_scale_factor * 2
-        width = width // multiple_of * multiple_of
-        height = height // multiple_of * multiple_of
+        # Use user-specified dimensions if provided, otherwise use default resolution
+        multiple_of = self.vae_scale_factor * 2  # Ensure divisibility by vae_scale_factor * 2
+        if batch.width is not None and batch.height is not None:
+            # User provided explicit dimensions, ensure divisibility
+            width = batch.width // multiple_of * multiple_of
+            height = batch.height // multiple_of * multiple_of
+        else:
+            # Fall back to default resolution with aspect ratio preservation
+            resolution = 640
+            calculated_width, calculated_height = calculate_dimensions(
+                resolution * resolution, image_size[0] / image_size[1]
+            )
+            width = calculated_width // multiple_of * multiple_of
+            height = calculated_height // multiple_of * multiple_of
 
         # if image is not None and not (isinstance(image, torch.Tensor) and image.size(1) == self.latent_channels):
-        image = self.image_processor.resize(image, calculated_height, calculated_width)
+        image = self.image_processor.resize(image, height, width)
         prompt_image = image
-        image = self.image_processor.preprocess(
-            image, calculated_height, calculated_width
-        )
+        image = self.image_processor.preprocess(image, height, width)
         image = image.unsqueeze(2)
         image = image.to(dtype=torch.bfloat16)
 
@@ -487,8 +489,8 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
                 ],
                 (
                     1,
-                    calculated_height // self.vae_scale_factor // 2,
-                    calculated_width // self.vae_scale_factor // 2,
+                    height // self.vae_scale_factor // 2,
+                    width // self.vae_scale_factor // 2,
                 ),
             ]
         ]
