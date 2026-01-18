@@ -423,23 +423,23 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
         image = image.convert("RGBA")
         image_size = image.size
 
-        # Use user-specified height/width if available, otherwise calculate from image
+        # Use user-specified height/width if available (must be divisible by 16),
+        # otherwise calculate from image aspect ratio with default resolution
+        multiple_of = self.vae_scale_factor * 2  # 16
         if batch.height is not None and batch.width is not None:
+            # User-provided dimensions should already be divisible by 16
             height = batch.height
             width = batch.width
         else:
+            # Calculate dimensions from image aspect ratio, then align to multiple_of
             resolution = 640  # Default resolution
             calculated_width, calculated_height = calculate_dimensions(
                 resolution * resolution, image_size[0] / image_size[1]
             )
-            height = calculated_height
-            width = calculated_width
+            height = calculated_height // multiple_of * multiple_of
+            width = calculated_width // multiple_of * multiple_of
 
-        multiple_of = self.vae_scale_factor * 2
-        width = width // multiple_of * multiple_of
-        height = height // multiple_of * multiple_of
-
-        # Resize image to computed dimensions
+        # Resize image to the target dimensions
         image = self.image_processor.resize(image, height, width)
         prompt_image = image
         image = self.image_processor.preprocess(image, height, width)
