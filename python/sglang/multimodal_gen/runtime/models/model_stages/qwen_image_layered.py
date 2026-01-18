@@ -534,6 +534,7 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
         batch.original_condition_image_size = image_size
         batch.raw_latent_shape = latents.shape
         batch.txt_seq_lens = txt_seq_lens
+        batch.negative_txt_seq_lens = negative_txt_seq_lens
         batch.img_shapes = img_shapes
         batch.height = height
         batch.width = width
