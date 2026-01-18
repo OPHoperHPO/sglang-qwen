@@ -422,30 +422,37 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
         image = load_image(batch.image_path[0])
         image = image.convert("RGBA")
         image_size = image.size
-        resolution = 640  # TODO: support user-specified resolution
-        calculated_width, calculated_height = calculate_dimensions(
-            resolution * resolution, image_size[0] / image_size[1]
-        )
 
-        height = calculated_height
-        width = calculated_width
+        # Use user-specified height/width if available, otherwise calculate from image
+        if batch.height is not None and batch.width is not None:
+            height = batch.height
+            width = batch.width
+        else:
+            resolution = 640  # Default resolution
+            calculated_width, calculated_height = calculate_dimensions(
+                resolution * resolution, image_size[0] / image_size[1]
+            )
+            height = calculated_height
+            width = calculated_width
 
         multiple_of = self.vae_scale_factor * 2
         width = width // multiple_of * multiple_of
         height = height // multiple_of * multiple_of
 
-        # if image is not None and not (isinstance(image, torch.Tensor) and image.size(1) == self.latent_channels):
-        image = self.image_processor.resize(image, calculated_height, calculated_width)
+        # Resize image to computed dimensions
+        image = self.image_processor.resize(image, height, width)
         prompt_image = image
-        image = self.image_processor.preprocess(
-            image, calculated_height, calculated_width
-        )
+        image = self.image_processor.preprocess(image, height, width)
         image = image.unsqueeze(2)
         image = image.to(dtype=torch.bfloat16)
 
-        prompt = self.get_image_caption(
-            prompt_image, use_en_prompt=use_en_prompt, device=device
-        )
+        # Use user-provided prompt if available, otherwise auto-generate caption from image
+        if batch.prompt and isinstance(batch.prompt, str) and batch.prompt.strip():
+            prompt = batch.prompt
+        else:
+            prompt = self.get_image_caption(
+                prompt_image, use_en_prompt=use_en_prompt, device=device
+            )
 
         prompt_embeds, prompt_embeds_mask = self.encode_prompt(
             prompt=prompt,
@@ -481,8 +488,8 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
                 ],
                 (
                     1,
-                    calculated_height // self.vae_scale_factor // 2,
-                    calculated_width // self.vae_scale_factor // 2,
+                    height // self.vae_scale_factor // 2,
+                    width // self.vae_scale_factor // 2,
                 ),
             ]
         ]
@@ -525,5 +532,7 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
         batch.raw_latent_shape = latents.shape
         batch.txt_seq_lens = txt_seq_lens
         batch.img_shapes = img_shapes
+        batch.height = height
+        batch.width = width
 
         return batch

@@ -602,7 +602,10 @@ def _register_configs():
     register_configs(
         sampling_param_cls=QwenImageLayeredSamplingParams,
         pipeline_config_cls=QwenImageLayeredPipelineConfig,
-        hf_model_paths=["Qwen/Qwen-Image-Layered"],
+        hf_model_paths=[
+            "Qwen/Qwen-Image-Layered",
+            "DiffSynth-Studio/Qwen-Image-Layered-Control",
+        ],
     )
 
     register_configs(
