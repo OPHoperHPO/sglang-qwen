@@ -528,8 +528,14 @@ class QwenImageLayeredPipelineConfig(QwenImageEditPipelineConfig):
         batch_size = latents.shape[0]
         layers = batch.num_frames
 
-        height = 2 * (int(batch.height) // (vae_scale_factor * 2))
-        width = 2 * (int(batch.width) // (vae_scale_factor * 2))
+        # Use stored latent dimensions if available (for QwenImageLayered),
+        # otherwise fall back to calculating from batch.height/batch.width
+        if hasattr(batch, "latent_height"):
+            height = batch.latent_height
+            width = batch.latent_width
+        else:
+            height = 2 * (int(batch.height) // (vae_scale_factor * 2))
+            width = 2 * (int(batch.width) // (vae_scale_factor * 2))
 
         latents = maybe_unpad_latents(latents, batch)
         latents = latents.view(

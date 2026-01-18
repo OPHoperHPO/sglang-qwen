@@ -469,6 +469,12 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
             device,
             generator,
         )
+
+        # Store the latent dimensions used for packing (needed for unpacking later)
+        # These are calculated the same way as in prepare_latents()
+        latent_height = 2 * (int(height) // (self.vae_scale_factor * 2))
+        latent_width = 2 * (int(width) // (self.vae_scale_factor * 2))
+
         img_shapes = [
             [
                 *[
@@ -525,5 +531,7 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
         batch.raw_latent_shape = latents.shape
         batch.txt_seq_lens = txt_seq_lens
         batch.img_shapes = img_shapes
+        batch.latent_height = latent_height
+        batch.latent_width = latent_width
 
         return batch
