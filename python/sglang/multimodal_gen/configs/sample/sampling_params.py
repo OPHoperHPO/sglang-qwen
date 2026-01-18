@@ -463,7 +463,9 @@ class SamplingParams:
                 # Re-raise if it's not a safetensors file issue
                 raise
 
-        user_sampling_params = SamplingParams(*args, **kwargs)
+        # Use the same class as sampling_params to allow class-specific validation
+        # (e.g., QwenImageLayeredSamplingParams allows num_frames=0)
+        user_sampling_params = type(sampling_params)(*args, **kwargs)
         # TODO: refactor
         sampling_params._merge_with_user_params(user_sampling_params)
         sampling_params._adjust(server_args)
@@ -757,10 +759,13 @@ class SamplingParams:
 
         # global switch: if True, allow overriding protected fields
         allow_override_protected = not user_params.no_override_protected_fields
+        # Use the actual class of user_params to get default values
+        # (supports subclasses like QwenImageLayeredSamplingParams)
+        user_params_class = type(user_params)
         for field in dataclasses.fields(user_params):
             field_name = field.name
             user_value = getattr(user_params, field_name)
-            default_class_value = getattr(SamplingParams, field_name)
+            default_class_value = getattr(user_params_class, field_name)
 
             # A field is considered user-modified if its value is different from the default
             is_user_modified = user_value != default_class_value
