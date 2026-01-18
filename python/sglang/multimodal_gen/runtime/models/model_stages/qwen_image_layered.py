@@ -518,6 +518,7 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
         # 5. Prepare timesteps
         # Calculate mu using DiffSynth-Studio's formula for Qwen-Image
         # dynamic_shift_len = (height // 16) * (width // 16)
+        # Note: vae_scale_factor=8, so 8*2=16, hence height // self.vae_scale_factor // 2 = height // 16
         dynamic_shift_len = (height // self.vae_scale_factor // 2) * (
             width // self.vae_scale_factor // 2
         )
