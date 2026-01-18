@@ -18,6 +18,24 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 
+# Copied from DiffSynth-Studio FlowMatchScheduler._calculate_shift_qwen_image
+def calculate_shift_qwen_image(
+    image_seq_len: int,
+    base_seq_len: int = 256,
+    max_seq_len: int = 8192,
+    base_shift: float = 0.5,
+    max_shift: float = 0.9,
+) -> float:
+    """Calculate the mu parameter for Qwen-Image timestep shifting.
+
+    This matches DiffSynth-Studio's _calculate_shift_qwen_image function.
+    """
+    m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
+    b = base_shift - m * base_seq_len
+    mu = image_seq_len * m + b
+    return mu
+
+
 # Copied from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus.calculate_dimensions
 def calculate_dimensions(target_area, ratio):
     width = math.sqrt(target_area * ratio)
@@ -498,10 +516,19 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
         ]
 
         # 5. Prepare timesteps
+        # Calculate mu using DiffSynth-Studio's formula for Qwen-Image
+        # dynamic_shift_len = (height // 16) * (width // 16)
+        dynamic_shift_len = (height // self.vae_scale_factor // 2) * (
+            width // self.vae_scale_factor // 2
+        )
+        mu = calculate_shift_qwen_image(
+            dynamic_shift_len,
+            base_seq_len=256,
+            max_seq_len=8192,
+            base_shift=0.5,
+            max_shift=0.9,
+        )
         sigmas = np.linspace(1.0, 0, num_inference_steps + 1)[:-1]
-        image_seq_len = latents.shape[1]
-        base_seqlen = 256 * 256 / 16 / 16
-        mu = (image_latents.shape[1] / base_seqlen) ** 0.5
         timesteps, num_inference_steps = retrieve_timesteps(
             self.scheduler,
             num_inference_steps,
