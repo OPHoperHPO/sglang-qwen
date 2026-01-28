@@ -179,7 +179,7 @@ WORKDIR /sgl-workspace
 
 # Install SGLang
 COPY --from=local_src /src /tmp/local_src
-RUN git clone --depth=1 https://github.com/OPHoperHPO/sglang-qwen.git /sgl-workspace/sglang; \
+RUN git clone --depth=1 https://github.com/OPHoperHPO/sglang-qwen.git /sgl-workspace/sglang \
     && rm -rf /tmp/local_src
 
 RUN --mount=type=cache,target=/root/.cache/pip \
