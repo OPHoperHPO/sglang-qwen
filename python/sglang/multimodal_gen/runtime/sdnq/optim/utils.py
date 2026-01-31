@@ -14,7 +14,7 @@ def get_param_grad(
     grad = param.grad.nan_to_num_().to(dtype=torch.float32)
     if grad_scale is not None:
         grad.div_(grad_scale.to(dtype=torch.float32))
-    grad = grad.clamp_(-clip,clip)
+    grad = grad.clamp_(-clip, clip)
 
     if isinstance(param, SDNQTensor):
         param_fp32 = param.dequantize(dtype=torch.float32).nan_to_num_()

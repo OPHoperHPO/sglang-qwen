@@ -51,8 +51,8 @@ class ModuleOffloadManager:
     def register_module(self, name: str, module: nn.Module) -> None:
         """Register a module for offload management."""
         self._modules[name] = module
-        # Assume modules start on GPU
-        if module is not None and hasattr(module, 'parameters'):
+        # Assume modules start on GPU based on first parameter location
+        if module is not None:
             try:
                 first_param = next(module.parameters(), None)
                 if first_param is not None:

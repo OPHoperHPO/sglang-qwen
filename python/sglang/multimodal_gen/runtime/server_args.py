@@ -299,7 +299,7 @@ class ServerArgs:
     sdnq_use_svd: bool = False
     sdnq_svd_rank: int = 32
     sdnq_dequantize_fp32: bool = False
-    sdnq_modules_to_not_convert: list[str] | None = None
+    sdnq_modules_to_not_convert: Optional[list[str]] = None
 
     # Module-level offloading for multimodal pipeline (RAM offloading)
     multimodal_module_offload: bool = False
