@@ -161,8 +161,10 @@ class SDNQWeightDequantizer:
     svd_up, packed_weight) and dequantizes them to produce regular float weights.
     """
 
-    # SDNQ parameter suffixes
+    # SDNQ auxiliary parameter suffixes (not including .weight which is the main param)
     SDNQ_SUFFIXES = [".scale", ".zero_point", ".svd_down", ".svd_up"]
+    # All SDNQ-related suffixes including the main weight
+    ALL_SDNQ_SUFFIXES = [".weight", ".scale", ".zero_point", ".svd_down", ".svd_up"]
 
     def __init__(self, quant_config: dict | None = None):
         """Initialize the dequantizer.
@@ -199,9 +201,9 @@ class SDNQWeightDequantizer:
             param_name: Full parameter name
 
         Returns:
-            Base parameter name
+            Base parameter name (e.g., "transformer_blocks.0.attn.to_q" from "transformer_blocks.0.attn.to_q.weight")
         """
-        for suffix in self.SDNQ_SUFFIXES:
+        for suffix in self.ALL_SDNQ_SUFFIXES:
             if param_name.endswith(suffix):
                 return param_name[: -len(suffix)]
         return param_name
@@ -215,10 +217,10 @@ class SDNQWeightDequantizer:
         Returns:
             Parameter type (e.g., "scale", "zero_point", "weight")
         """
-        for suffix in self.SDNQ_SUFFIXES:
+        for suffix in self.ALL_SDNQ_SUFFIXES:
             if param_name.endswith(suffix):
                 return suffix[1:]  # Remove leading dot
-        return "weight"
+        return "unknown"
 
     def add_param(self, param_name: str, tensor: torch.Tensor) -> None:
         """Add a parameter to the buffer for later dequantization.
@@ -306,47 +308,80 @@ class SDNQWeightDequantizer:
         Yields:
             (param_name, tensor) pairs with dequantized weights
         """
-        # First pass: collect all params and identify SDNQ layers
+        # First pass: collect all params
         all_params = list(weight_iterator)
+        all_param_names = {name for name, _ in all_params}
 
-        # Identify which base names have SDNQ auxiliary params
+        # Identify which base names have SDNQ auxiliary params (scale, zero_point, etc.)
+        # A base name is SDNQ-quantized if it has .scale and .zero_point params
         sdnq_bases = set()
         for param_name, _ in all_params:
-            if self.is_sdnq_param(param_name):
+            if self.is_sdnq_param(param_name):  # Auxiliary param
                 base_name = self.get_base_name(param_name)
                 sdnq_bases.add(base_name)
 
-        # First pass: buffer all SDNQ-related params
+        logger.info(
+            "Found %d SDNQ-quantized layers (have scale/zero_point params)",
+            len(sdnq_bases),
+        )
+
+        # Buffer all SDNQ-related params (weights + auxiliaries)
         for param_name, tensor in all_params:
             base_name = self.get_base_name(param_name)
-            if self.is_sdnq_param(param_name) or base_name in sdnq_bases:
-                # Buffer both auxiliary params and main weights for SDNQ layers
+            if base_name in sdnq_bases:
+                # This is an SDNQ layer - buffer the param
                 self.add_param(param_name, tensor)
+                logger.debug(
+                    "Buffered SDNQ param: %s (type: %s, shape: %s)",
+                    param_name,
+                    self.get_param_type(param_name),
+                    tensor.shape,
+                )
 
-        # Second pass: yield dequantized weights
+        # Second pass: yield params, dequantizing SDNQ weights
         yielded_bases = set()
         for param_name, tensor in all_params:
-            if self.is_sdnq_param(param_name):
-                # Skip auxiliary params
-                continue
-
             base_name = self.get_base_name(param_name)
 
-            # Try to get target shape from model state dict
-            # Map various possible names
-            target_tensor = model_state_dict.get(param_name)
-            if target_tensor is None:
-                # Try with .weight suffix
-                target_tensor = model_state_dict.get(param_name + ".weight")
+            # Skip auxiliary params (scale, zero_point, svd_*)
+            if self.is_sdnq_param(param_name):
+                continue
 
-            if self.can_dequantize(base_name) and base_name not in yielded_bases:
-                if target_tensor is not None:
-                    target_shape = target_tensor.shape
-                    dequantized = self.dequantize(base_name, target_shape, tensor.dtype)
+            # Check if this is an SDNQ weight that needs dequantization
+            if base_name in sdnq_bases and base_name not in yielded_bases:
+                # Get target shape from model state dict
+                target_tensor = model_state_dict.get(param_name)
+
+                if target_tensor is not None and self.can_dequantize(base_name):
+                    target_shape = tuple(target_tensor.shape)
+                    logger.info(
+                        "Dequantizing SDNQ weight: %s from shape %s to %s",
+                        param_name,
+                        tensor.shape,
+                        target_shape,
+                    )
+                    dequantized = self.dequantize(
+                        base_name, target_shape, target_tensor.dtype
+                    )
                     if dequantized is not None:
                         yield param_name, dequantized
                         yielded_bases.add(base_name)
                         continue
+                    else:
+                        logger.warning(
+                            "Failed to dequantize SDNQ weight: %s", param_name
+                        )
+                else:
+                    if target_tensor is None:
+                        logger.warning(
+                            "Could not find target shape for SDNQ weight: %s", param_name
+                        )
+                    if not self.can_dequantize(base_name):
+                        logger.warning(
+                            "Missing required params for SDNQ dequantization: %s (have: %s)",
+                            param_name,
+                            list(self._param_buffer.get(base_name, {}).keys()),
+                        )
 
             # Not an SDNQ weight or couldn't dequantize, yield as-is
             yield param_name, tensor
