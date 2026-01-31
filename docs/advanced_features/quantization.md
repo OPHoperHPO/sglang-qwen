@@ -382,6 +382,46 @@ SGLang running on AMD GPUs (CDNA3 or CDNA4 architecture) supports the quantizati
 
 Other layers (e.g. projections in the attention layers) have their weights quantized online to float8 directly.
 
+## SDNQ Quantization for Diffusion Models
+
+SGLang supports [SDNQ (Stable Diffusion Neural Quantization)](https://github.com/Disty0/sdnq) for efficient inference of diffusion models like Qwen-Image-Layered with reduced memory usage.
+
+SDNQ provides:
+- uint4/int8 weight quantization with SVD low-rank adapters
+- Optional INT8 MatMul acceleration using Triton kernels
+- Support for NVIDIA, AMD ROCm, and Intel ARC GPUs
+
+### Installation
+
+```bash
+pip install sdnq
+```
+
+### Usage
+
+```python
+import torch
+import diffusers
+from sdnq import SDNQConfig  # Import to register with diffusers
+from sdnq.common import use_torch_compile as triton_is_available
+from sdnq.loader import apply_sdnq_options_to_model
+
+# Load SDNQ quantized model
+pipe = diffusers.QwenImageLayeredPipeline.from_pretrained(
+    "Disty0/Qwen-Image-Layered-SDNQ-uint4-svd-r32",
+    torch_dtype=torch.bfloat16
+)
+
+# Enable INT8 MatMul acceleration (optional)
+if triton_is_available and (torch.cuda.is_available() or torch.xpu.is_available()):
+    pipe.transformer = apply_sdnq_options_to_model(pipe.transformer, use_quantized_matmul=True)
+    pipe.text_encoder = apply_sdnq_options_to_model(pipe.text_encoder, use_quantized_matmul=True)
+
+pipe.enable_model_cpu_offload()
+```
+
+For complete usage examples, see the [Diffusion Models documentation](../supported_models/diffusion_models.md#sdnq-quantized-models).
+
 ## Reference
 
 - [GPTQModel](https://github.com/ModelCloud/GPTQModel)
@@ -390,3 +430,4 @@ Other layers (e.g. projections in the attention layers) have their weights quant
 - [Torchao: PyTorch Architecture Optimization](https://github.com/pytorch/ao)
 - [vLLM Quantization](https://docs.vllm.ai/en/latest/quantization/)
 - [auto-round](https://github.com/intel/auto-round)
+- [SDNQ](https://github.com/Disty0/sdnq)

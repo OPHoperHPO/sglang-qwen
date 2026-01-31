@@ -147,6 +147,110 @@ This section lists example LoRAs that have been explicitly tested and verified w
 > Sliding Tile Attention: Currently, only Hopper GPUs (H100s) are supported.
 
 
+## SDNQ Quantized Models
+
+SGLang Diffusion supports [SDNQ (Stable Diffusion Neural Quantization)](https://github.com/Disty0/sdnq) quantized models for efficient inference with reduced memory usage. SDNQ provides uint4/int8 weight quantization with SVD low-rank adapters.
+
+### Supported SDNQ Models
+
+| Model Name                      | HuggingFace Model ID                                  | Notes                           |
+|:--------------------------------|:------------------------------------------------------|:--------------------------------|
+| Qwen-Image-Layered SDNQ uint4   | `Disty0/Qwen-Image-Layered-SDNQ-uint4-svd-r32`       | 4-bit quantized with SVD r=32   |
+
+### Installation
+
+To use SDNQ quantized models, install the sdnq library:
+
+```bash
+pip install sdnq
+```
+
+### Usage with Diffusers Pipeline
+
+SDNQ models can be loaded directly with the diffusers pipeline. The sdnq library automatically registers itself when imported:
+
+```python
+import torch
+import diffusers
+from PIL import Image
+from sdnq import SDNQConfig  # Import sdnq to register it into diffusers and transformers
+from sdnq.common import use_torch_compile as triton_is_available
+from sdnq.loader import apply_sdnq_options_to_model
+
+# Load the SDNQ quantized model
+pipe = diffusers.QwenImageLayeredPipeline.from_pretrained(
+    "Disty0/Qwen-Image-Layered-SDNQ-uint4-svd-r32",
+    torch_dtype=torch.bfloat16
+)
+
+# Optional: Enable INT8 MatMul for AMD, Intel ARC and Nvidia GPUs
+# This provides additional acceleration on supported hardware
+if triton_is_available and (torch.cuda.is_available() or torch.xpu.is_available()):
+    pipe.transformer = apply_sdnq_options_to_model(pipe.transformer, use_quantized_matmul=True)
+    pipe.text_encoder = apply_sdnq_options_to_model(pipe.text_encoder, use_quantized_matmul=True)
+    # Optional: Enable torch.compile for even faster speeds
+    # pipe.transformer = torch.compile(pipe.transformer)
+
+pipe.enable_model_cpu_offload()
+pipe.set_progress_bar_config(disable=None)
+
+# Load input image
+image = Image.open("input.png").convert("RGBA")
+
+# Generate layered output
+with torch.inference_mode():
+    output = pipe(
+        image=image,
+        generator=torch.manual_seed(777),
+        true_cfg_scale=4.0,
+        negative_prompt=" ",
+        num_inference_steps=50,
+        num_images_per_prompt=1,
+        layers=4,
+        resolution=640,      # Using different bucket (640, 1024) to determine the resolution
+        cfg_normalize=True,  # Whether to enable cfg normalization
+        use_en_prompt=True,  # Automatic caption language if user does not provide caption
+    ).images[0]
+
+# Save output layers
+for i, img in enumerate(output):
+    img.save(f"{i}.png")
+```
+
+### Using SDNQ Config in SGLang
+
+SGLang also provides an `SDNQQuantizationConfig` class for programmatic configuration:
+
+```python
+from sglang.multimodal_gen.runtime.layers.quantization import SDNQQuantizationConfig
+
+# Create SDNQ config with INT8 matmul acceleration
+config = SDNQQuantizationConfig(
+    use_quantized_matmul=True,      # Enable INT8 MatMul (requires Triton + CUDA/XPU)
+    apply_to_transformer=True,       # Apply to transformer model
+    apply_to_text_encoder=True       # Apply to text encoder
+)
+
+# Apply SDNQ options to a model
+model = config.apply_sdnq_to_model(model)
+```
+
+### Hardware Requirements
+
+SDNQ quantization supports:
+- **NVIDIA GPUs**: Volta (SM 70+), Turing, Ampere, Hopper, Blackwell
+- **AMD GPUs**: ROCm-compatible GPUs
+- **Intel GPUs**: Intel ARC GPUs with XPU support
+
+INT8 MatMul acceleration requires Triton and either CUDA or XPU runtime.
+
+### Memory Savings
+
+SDNQ uint4 quantization typically provides:
+- ~75% reduction in model weight memory compared to float16
+- Comparable quality to full-precision models due to SVD low-rank adapters
+
+
 ---
 
 # SGLang diffusion CLI Inference
