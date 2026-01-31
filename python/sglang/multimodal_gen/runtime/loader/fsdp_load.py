@@ -90,9 +90,27 @@ def maybe_load_fsdp_model(
     output_dtype: torch.dtype | None = None,
     pin_cpu_memory: bool = True,
     strict: bool = True,
+    sdnq_config: dict | None = None,
 ) -> torch.nn.Module:
     """
     Load the model with FSDP if is training, else load the model without FSDP.
+
+    Args:
+        model_cls: Model class to instantiate
+        init_params: Parameters for model initialization
+        weight_dir_list: List of paths to weight files
+        device: Target device
+        hsdp_replicate_dim: HSDP replicate dimension
+        hsdp_shard_dim: HSDP shard dimension
+        default_dtype: Default tensor dtype
+        param_dtype: Parameter dtype for mixed precision
+        reduce_dtype: Reduce dtype for mixed precision
+        cpu_offload: Whether to offload to CPU
+        fsdp_inference: Whether to use FSDP for inference
+        output_dtype: Output dtype for mixed precision
+        pin_cpu_memory: Whether to pin CPU memory
+        strict: Whether to strictly match parameters
+        sdnq_config: Optional SDNQ quantization config for dequantization
     """
     # NOTE(will): cast_forward_inputs=True shouldn't be needed as we are
     # manually casting the inputs to the model
@@ -143,6 +161,20 @@ def maybe_load_fsdp_model(
         )
 
     weight_iterator = safetensors_weights_iterator(weight_dir_list)
+
+    # Handle SDNQ quantized weights if config is provided
+    if sdnq_config is not None:
+        from sglang.multimodal_gen.runtime.loader.sdnq_utils import (
+            SDNQWeightDequantizer,
+        )
+
+        logger.info("SDNQ config detected, will dequantize weights during loading")
+        dequantizer = SDNQWeightDequantizer(sdnq_config)
+        model_state_dict = model.state_dict()
+        weight_iterator = dequantizer.process_weight_iterator(
+            weight_iterator, model_state_dict
+        )
+
     param_names_mapping_fn = get_param_names_mapping(model.param_names_mapping)
     load_model_from_full_model_state_dict(
         model,

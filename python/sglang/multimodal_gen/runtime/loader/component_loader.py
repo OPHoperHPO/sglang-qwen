@@ -52,6 +52,53 @@ from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
 logger = init_logger(__name__)
 
 
+def _is_sdnq_quantized_model(model_path: str) -> bool:
+    """Check if a model is SDNQ-quantized by reading its config.json.
+
+    Args:
+        model_path: Path to the model directory
+
+    Returns:
+        True if the model is SDNQ-quantized, False otherwise
+    """
+    from sglang.multimodal_gen.runtime.loader.sdnq_utils import is_sdnq_quantized_model
+
+    return is_sdnq_quantized_model(model_path)
+
+
+def _get_sdnq_config(model_path: str) -> dict | None:
+    """Get SDNQ quantization config from model's config.json.
+
+    Args:
+        model_path: Path to the model directory
+
+    Returns:
+        SDNQ quantization config dict or None if not found
+    """
+    from sglang.multimodal_gen.runtime.loader.sdnq_utils import get_sdnq_config
+
+    return get_sdnq_config(model_path)
+
+
+def _try_import_sdnq() -> bool:
+    """Try to import sdnq library for SDNQ-quantized models.
+
+    Returns:
+        True if sdnq was imported successfully, False otherwise
+    """
+    try:
+        import sdnq  # noqa: F401
+
+        logger.info("SDNQ library imported for quantized model loading")
+        return True
+    except ImportError:
+        logger.warning(
+            "SDNQ-quantized model detected but sdnq library is not installed. "
+            "Install with: pip install sdnq"
+        )
+        return False
+
+
 class skip_init_modules:
     def __enter__(self):
         # Save originals
@@ -146,6 +193,8 @@ class ComponentLoader(ABC):
             2. load native diffusers/transformers module
         If all of the above methods failed, an error will be thrown
 
+        Note: SDNQ-quantized models are now supported in customized loading through
+        weight dequantization during the loading process.
         """
         gpu_mem_before_loading = current_platform.get_available_gpu_memory()
         logger.info(
@@ -154,6 +203,7 @@ class ComponentLoader(ABC):
             component_model_path,
             gpu_mem_before_loading,
         )
+
         try:
             component = self.load_customized(
                 component_model_path, server_args, module_name
@@ -723,6 +773,14 @@ class TransformerLoader(ComponentLoader):
             default_dtype,
         )
 
+        # Check for SDNQ quantization config
+        sdnq_config = _get_sdnq_config(component_model_path)
+        if sdnq_config is not None:
+            logger.info(
+                "Detected SDNQ-quantized transformer model, will dequantize during loading"
+            )
+            _try_import_sdnq()  # Import sdnq to ensure hooks are available
+
         # Load the model using FSDP loader
         assert server_args.hsdp_shard_dim is not None
         model = maybe_load_fsdp_model(
@@ -741,6 +799,7 @@ class TransformerLoader(ComponentLoader):
             reduce_dtype=torch.float32,
             output_dtype=None,
             strict=False,
+            sdnq_config=sdnq_config,
         )
 
         total_params = sum(p.numel() for p in model.parameters())
