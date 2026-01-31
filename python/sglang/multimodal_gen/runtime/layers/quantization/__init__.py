@@ -63,9 +63,17 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     return method_to_config[quantization]
 
 
-all = [
+# Import SDNQ config to register it
+from sglang.multimodal_gen.runtime.layers.quantization.sdnq_config import (
+    SDNQLinearMethod,
+    SDNQQuantizationConfig,
+)
+
+__all__ = [
     "QuantizationMethods",
     "QuantizationConfig",
     "get_quantization_config",
     "QUANTIZATION_METHODS",
+    "SDNQQuantizationConfig",
+    "SDNQLinearMethod",
 ]
