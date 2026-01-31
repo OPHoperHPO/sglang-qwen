@@ -167,17 +167,21 @@ pip install sdnq
 
 ### Usage with Diffusers Pipeline
 
-SDNQ models can be loaded directly with the diffusers pipeline. The sdnq library automatically registers itself when imported:
+SDNQ models can be loaded directly with the diffusers pipeline. **The sdnq library uses a hook-based mechanism that automatically intercepts model loading.** When you import `sdnq`, it:
+
+1. Registers custom quantization classes with HuggingFace transformers/diffusers
+2. Automatically detects SDNQ-quantized models from their `config.json` (which contains `"quantization_config": {"quant_method": "sdnq", ...}`)
+3. Loads quantized weights and applies dequantization on-the-fly
 
 ```python
 import torch
 import diffusers
 from PIL import Image
-from sdnq import SDNQConfig  # Import sdnq to register it into diffusers and transformers
+from sdnq import SDNQConfig  # This import is REQUIRED - it hooks into diffusers/transformers
 from sdnq.common import use_torch_compile as triton_is_available
 from sdnq.loader import apply_sdnq_options_to_model
 
-# Load the SDNQ quantized model
+# Load the SDNQ quantized model - quantization is applied automatically!
 pipe = diffusers.QwenImageLayeredPipeline.from_pretrained(
     "Disty0/Qwen-Image-Layered-SDNQ-uint4-svd-r32",
     torch_dtype=torch.bfloat16
@@ -217,9 +221,37 @@ for i, img in enumerate(output):
     img.save(f"{i}.png")
 ```
 
-### Using SDNQ Config in SGLang
+### How Auto-Detection Works
 
-SGLang also provides an `SDNQQuantizationConfig` class for programmatic configuration:
+When you load an SDNQ-quantized model like `Disty0/Qwen-Image-Layered-SDNQ-uint4-svd-r32`:
+
+1. **Model Config Detection**: The model's `config.json` contains a `quantization_config` section:
+   ```json
+   {
+     "quantization_config": {
+       "quant_method": "sdnq",
+       "bits": 4,
+       ...
+     }
+   }
+   ```
+
+2. **SDNQ Hook Activation**: When `sdnq` is imported, it registers hooks that intercept `from_pretrained()` calls
+
+3. **Automatic Loading**: The sdnq library automatically:
+   - Detects the quantization config from model files
+   - Loads quantized weights (uint4/int8)
+   - Applies SVD low-rank adapters for quality preservation
+   - Wraps layers with dequantization logic
+
+> [!IMPORTANT]
+> You **must** import sdnq before loading the model: `from sdnq import SDNQConfig`
+
+### Using SDNQ Config in SGLang (Advanced)
+
+For advanced use cases, SGLang provides `SDNQQuantizationConfig` for programmatic control over SDNQ options. This is useful when you want to:
+- Apply INT8 MatMul acceleration to an already-loaded model
+- Configure SDNQ behavior without using the sdnq library's auto-detection
 
 ```python
 from sglang.multimodal_gen.runtime.layers.quantization import SDNQQuantizationConfig
@@ -231,7 +263,7 @@ config = SDNQQuantizationConfig(
     apply_to_text_encoder=True       # Apply to text encoder
 )
 
-# Apply SDNQ options to a model
+# Apply SDNQ options to a model (e.g., enable INT8 matmul post-load)
 model = config.apply_sdnq_to_model(model)
 ```
 
@@ -251,6 +283,12 @@ SDNQ uint4 quantization typically provides:
 - Comparable quality to full-precision models due to SVD low-rank adapters
 
 ### Using SDNQ with CLI
+
+> [!IMPORTANT]
+> The `sdnq` library must be installed: `pip install sdnq`
+> 
+> When using the CLI with SDNQ models, the sdnq library's hooks are activated when diffusers loads the model.
+> This happens automatically - no explicit import is needed in CLI usage.
 
 SDNQ quantized models can be used directly with the `sglang generate` CLI. Simply pass the SDNQ model path:
 
