@@ -113,7 +113,7 @@ class SDNQQuantizationConfig(QuantizationConfig):
                     "INT8 matmul will be disabled."
                 )
                 self.use_quantized_matmul = False
-            elif not (torch.cuda.is_available() or hasattr(torch, "xpu")):
+            elif not (torch.cuda.is_available() or (hasattr(torch, "xpu") and torch.xpu.is_available())):
                 logger.warning(
                     "Neither CUDA nor XPU is available. "
                     "INT8 matmul will be disabled."

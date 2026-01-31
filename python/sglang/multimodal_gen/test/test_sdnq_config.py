@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for SDNQ quantization config."""
 
-import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
