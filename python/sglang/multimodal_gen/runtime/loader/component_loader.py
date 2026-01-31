@@ -661,7 +661,51 @@ class VAELoader(ComponentLoader):
         ), f"Found {len(safetensors_list)} safetensors files in {component_model_path}"
         loaded = safetensors_load_file(safetensors_list[0])
         vae.load_state_dict(loaded, strict=False)
+
+        # Apply SDNQ quantization to VAE if enabled
+        if server_args.sdnq_enabled and server_args.sdnq_quant_conv:
+            vae = self._apply_sdnq_quantization(vae, server_args, "vae")
+
         return vae.eval()
+
+    def _apply_sdnq_quantization(
+        self,
+        model: nn.Module,
+        server_args: ServerArgs,
+        module_name: str,
+    ) -> nn.Module:
+        """Apply SDNQ quantization to the VAE model if enabled."""
+        try:
+            from sglang.multimodal_gen.runtime.sdnq import sdnq_post_load_quant
+
+            logger.info(
+                f"Applying SDNQ quantization to {module_name} "
+                f"(dtype={server_args.sdnq_weights_dtype})"
+            )
+
+            modules_to_not_convert = server_args.sdnq_modules_to_not_convert or []
+
+            quantized_model = sdnq_post_load_quant(
+                model,
+                weights_dtype=server_args.sdnq_weights_dtype,
+                torch_dtype=torch.bfloat16,
+                group_size=server_args.sdnq_group_size,
+                svd_rank=server_args.sdnq_svd_rank,
+                use_svd=server_args.sdnq_use_svd,
+                quant_conv=True,  # Always quant conv for VAE
+                use_quantized_matmul=server_args.sdnq_use_quantized_matmul,
+                dequantize_fp32=server_args.sdnq_dequantize_fp32,
+                non_blocking=True,
+                add_skip_keys=True,
+                modules_to_not_convert=modules_to_not_convert,
+            )
+
+            logger.info(f"SDNQ quantization applied to {module_name}")
+            return quantized_model
+
+        except Exception as e:
+            logger.warning(f"Failed to apply SDNQ quantization to {module_name}: {e}")
+            return model
 
 
 class TransformerLoader(ComponentLoader):
@@ -752,7 +796,60 @@ class TransformerLoader(ComponentLoader):
 
         model = model.eval()
 
+        # Apply SDNQ quantization if enabled
+        if server_args.sdnq_enabled:
+            model = self._apply_sdnq_quantization(model, server_args, "transformer")
+
         return model
+
+    def _apply_sdnq_quantization(
+        self,
+        model: nn.Module,
+        server_args: ServerArgs,
+        module_name: str,
+    ) -> nn.Module:
+        """Apply SDNQ quantization to the model if enabled."""
+        try:
+            from sglang.multimodal_gen.runtime.sdnq import sdnq_post_load_quant
+
+            logger.info(
+                f"Applying SDNQ quantization to {module_name} "
+                f"(dtype={server_args.sdnq_weights_dtype}, "
+                f"quantized_matmul={server_args.sdnq_use_quantized_matmul})"
+            )
+
+            modules_to_not_convert = server_args.sdnq_modules_to_not_convert or []
+
+            quantized_model = sdnq_post_load_quant(
+                model,
+                weights_dtype=server_args.sdnq_weights_dtype,
+                torch_dtype=torch.bfloat16,
+                group_size=server_args.sdnq_group_size,
+                svd_rank=server_args.sdnq_svd_rank,
+                use_svd=server_args.sdnq_use_svd,
+                quant_conv=server_args.sdnq_quant_conv,
+                use_quantized_matmul=server_args.sdnq_use_quantized_matmul,
+                dequantize_fp32=server_args.sdnq_dequantize_fp32,
+                non_blocking=True,
+                add_skip_keys=True,
+                modules_to_not_convert=modules_to_not_convert,
+            )
+
+            # Calculate memory savings
+            original_params = sum(p.numel() * p.element_size() for p in model.parameters())
+            quantized_params = sum(p.numel() * p.element_size() for p in quantized_model.parameters())
+            savings_pct = (1 - quantized_params / original_params) * 100 if original_params > 0 else 0
+
+            logger.info(
+                f"SDNQ quantization applied to {module_name}. "
+                f"Memory savings: {savings_pct:.1f}%"
+            )
+            return quantized_model
+
+        except Exception as e:
+            logger.warning(f"Failed to apply SDNQ quantization to {module_name}: {e}")
+            logger.warning("Continuing with unquantized model")
+            return model
 
 
 class SchedulerLoader(ComponentLoader):

@@ -290,6 +290,21 @@ class ServerArgs:
     use_fsdp_inference: bool = False
     pin_cpu_memory: bool = True
 
+    # SDNQ quantization parameters (for low-end GPU support)
+    sdnq_enabled: bool = False
+    sdnq_weights_dtype: str = "int8"  # int8, int4, uint4, etc.
+    sdnq_use_quantized_matmul: bool = False
+    sdnq_quant_conv: bool = False
+    sdnq_group_size: int = 0  # 0 = auto
+    sdnq_use_svd: bool = False
+    sdnq_svd_rank: int = 32
+    sdnq_dequantize_fp32: bool = False
+    sdnq_modules_to_not_convert: list[str] | None = None
+
+    # Module-level offloading for multimodal pipeline (RAM offloading)
+    multimodal_module_offload: bool = False
+    multimodal_sequential_offload: bool = False
+
     # ComfyUI integration
     comfyui_mode: bool = False
 
@@ -636,6 +651,70 @@ class ServerArgs:
             "--disable-autocast",
             action=StoreBoolean,
             help="Disable autocast for denoising loop and vae decoding in pipeline sampling",
+        )
+
+        # SDNQ quantization parameters
+        parser.add_argument(
+            "--sdnq-enabled",
+            action=StoreBoolean,
+            default=ServerArgs.sdnq_enabled,
+            help="Enable SDNQ quantization for low-end GPU support. Reduces memory usage significantly.",
+        )
+        parser.add_argument(
+            "--sdnq-weights-dtype",
+            type=str,
+            default=ServerArgs.sdnq_weights_dtype,
+            help="Target dtype for SDNQ weights quantization (e.g., int8, int4, uint4, float8_e4m3fn).",
+        )
+        parser.add_argument(
+            "--sdnq-use-quantized-matmul",
+            action=StoreBoolean,
+            default=ServerArgs.sdnq_use_quantized_matmul,
+            help="Use INT8/FP8 quantized matrix multiplication for faster inference.",
+        )
+        parser.add_argument(
+            "--sdnq-quant-conv",
+            action=StoreBoolean,
+            default=ServerArgs.sdnq_quant_conv,
+            help="Also quantize convolutional layers with SDNQ.",
+        )
+        parser.add_argument(
+            "--sdnq-group-size",
+            type=int,
+            default=ServerArgs.sdnq_group_size,
+            help="Group size for SDNQ quantization. 0 = auto-select based on weights_dtype.",
+        )
+        parser.add_argument(
+            "--sdnq-use-svd",
+            action=StoreBoolean,
+            default=ServerArgs.sdnq_use_svd,
+            help="Enable SVDQuant algorithm on top of SDNQ for better accuracy.",
+        )
+        parser.add_argument(
+            "--sdnq-svd-rank",
+            type=int,
+            default=ServerArgs.sdnq_svd_rank,
+            help="Rank size for SVDQuant algorithm.",
+        )
+        parser.add_argument(
+            "--sdnq-dequantize-fp32",
+            action=StoreBoolean,
+            default=ServerArgs.sdnq_dequantize_fp32,
+            help="Use FP32 for dequantization step (higher precision but slower).",
+        )
+
+        # Module-level offloading for multimodal pipeline
+        parser.add_argument(
+            "--multimodal-module-offload",
+            action=StoreBoolean,
+            default=ServerArgs.multimodal_module_offload,
+            help="Enable module-level offloading to RAM for multimodal pipeline models.",
+        )
+        parser.add_argument(
+            "--multimodal-sequential-offload",
+            action=StoreBoolean,
+            default=ServerArgs.multimodal_sequential_offload,
+            help="Enable sequential offloading for multimodal pipeline (loads modules one at a time).",
         )
 
         # VSA parameters

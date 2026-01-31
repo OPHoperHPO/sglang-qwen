@@ -228,6 +228,7 @@ class QwenImageLayeredPipeline(QwenImageEditPipeline):
                 transformer=self.get_module("transformer"),
                 scheduler=self.get_module("scheduler"),
                 model_path=self.model_path,
+                server_args=server_args,
             ),
         )
 

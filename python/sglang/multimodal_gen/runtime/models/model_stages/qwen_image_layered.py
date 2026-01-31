@@ -14,8 +14,63 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.module_offload import (
+    ModuleOffloadManager,
+    MultimodalPipelineOffloadMixin,
+)
 
 logger = init_logger(__name__)
+
+
+def apply_sdnq_quantization(
+    model: torch.nn.Module,
+    server_args: ServerArgs,
+    module_name: str = "model",
+) -> torch.nn.Module:
+    """
+    Apply SDNQ quantization to a model if enabled in server_args.
+
+    Args:
+        model: The PyTorch model to quantize.
+        server_args: Server arguments containing SDNQ configuration.
+        module_name: Name of the module for logging purposes.
+
+    Returns:
+        The quantized model if SDNQ is enabled, otherwise the original model.
+    """
+    if not server_args.sdnq_enabled:
+        return model
+
+    try:
+        from sglang.multimodal_gen.runtime.sdnq import sdnq_post_load_quant
+
+        logger.info(f"Applying SDNQ quantization to {module_name} with dtype={server_args.sdnq_weights_dtype}")
+
+        # Build modules_to_not_convert list
+        modules_to_not_convert = server_args.sdnq_modules_to_not_convert or []
+
+        quantized_model = sdnq_post_load_quant(
+            model,
+            weights_dtype=server_args.sdnq_weights_dtype,
+            torch_dtype=torch.bfloat16,
+            group_size=server_args.sdnq_group_size,
+            svd_rank=server_args.sdnq_svd_rank,
+            use_svd=server_args.sdnq_use_svd,
+            quant_conv=server_args.sdnq_quant_conv,
+            use_quantized_matmul=server_args.sdnq_use_quantized_matmul,
+            dequantize_fp32=server_args.sdnq_dequantize_fp32,
+            non_blocking=True,
+            add_skip_keys=True,
+            modules_to_not_convert=modules_to_not_convert,
+        )
+
+        logger.info(f"Successfully applied SDNQ quantization to {module_name}")
+        return quantized_model
+
+    except Exception as e:
+        logger.warning(f"Failed to apply SDNQ quantization to {module_name}: {e}")
+        logger.warning("Continuing with unquantized model")
+        return model
 
 
 # Copied from DiffSynth-Studio FlowMatchScheduler._calculate_shift_qwen_image
@@ -127,25 +182,68 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
-class QwenImageLayeredBeforeDenoisingStage(PipelineStage):
+class QwenImageLayeredBeforeDenoisingStage(PipelineStage, MultimodalPipelineOffloadMixin):
+    """
+    Pipeline stage for QwenImage layered before denoising.
+    Supports SDNQ quantization and module-level offloading for low-end GPUs.
+    """
+
+    _offload_module_names = ["vae", "text_encoder", "transformer"]
+
     def __init__(
-        self, vae, tokenizer, processor, transformer, scheduler, model_path
+        self, vae, tokenizer, processor, transformer, scheduler, model_path,
+        server_args: Optional[ServerArgs] = None
     ) -> None:
         super().__init__()
+        self.model_path = model_path
+        self.server_args = server_args
+
+        # Initialize module offload manager if enabled
+        self.module_offload_manager = None
+        if server_args and server_args.multimodal_module_offload:
+            self.module_offload_manager = ModuleOffloadManager(
+                pin_cpu_memory=server_args.pin_cpu_memory,
+                sequential_mode=server_args.multimodal_sequential_offload,
+            )
+
+        # Load and optionally quantize VAE
         self.vae = vae.to(torch.bfloat16)
+        if server_args and server_args.sdnq_enabled:
+            self.vae = apply_sdnq_quantization(self.vae, server_args, "vae")
+
+        # Load text encoder with optional SDNQ quantization
         from transformers import Qwen2_5_VLForConditionalGeneration
 
-        self.text_encoder = (
-            Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                model_path, subfolder="text_encoder"
-            )
-            .to(get_local_torch_device())
-            .to(torch.bfloat16)
+        text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            model_path, subfolder="text_encoder"
         )
+        text_encoder = text_encoder.to(get_local_torch_device()).to(torch.bfloat16)
+
+        if server_args and server_args.sdnq_enabled:
+            text_encoder = apply_sdnq_quantization(text_encoder, server_args, "text_encoder")
+
+        self.text_encoder = text_encoder
+
         self.tokenizer = tokenizer
         self.processor = processor
+
+        # Optionally quantize transformer
         self.transformer = transformer
+        if server_args and server_args.sdnq_enabled:
+            self.transformer = apply_sdnq_quantization(self.transformer, server_args, "transformer")
+
         self.scheduler = scheduler
+
+        # Register modules for offloading
+        if self.module_offload_manager:
+            self.module_offload_manager.register_module("vae", self.vae)
+            self.module_offload_manager.register_module("text_encoder", self.text_encoder)
+            self.module_offload_manager.register_module("transformer", self.transformer)
+
+            # Initially offload VAE and transformer if using sequential offload
+            if server_args and server_args.multimodal_sequential_offload:
+                self.module_offload_manager.offload_module("transformer", non_blocking=False)
+                logger.info("Offloaded transformer to CPU for sequential processing")
 
         self.vae_scale_factor = (
             2 ** len(self.vae.temperal_downsample) if getattr(self, "vae", None) else 8
