@@ -250,6 +250,59 @@ SDNQ uint4 quantization typically provides:
 - ~75% reduction in model weight memory compared to float16
 - Comparable quality to full-precision models due to SVD low-rank adapters
 
+### Using SDNQ with CLI
+
+SDNQ quantized models can be used directly with the `sglang generate` CLI. Simply pass the SDNQ model path:
+
+```bash
+# Basic usage - generate image with SDNQ quantized model
+sglang generate \
+    --model-path Disty0/Qwen-Image-Layered-SDNQ-uint4-svd-r32 \
+    --prompt "A beautiful landscape" \
+    --precision bf16 \
+    --save-output
+```
+
+For image-to-image generation with Qwen-Image-Layered:
+
+```bash
+sglang generate \
+    --model-path Disty0/Qwen-Image-Layered-SDNQ-uint4-svd-r32 \
+    --image-path input.png \
+    --prompt "Enhanced version" \
+    --height 640 \
+    --width 640 \
+    --num-inference-steps 50 \
+    --seed 777 \
+    --precision bf16 \
+    --save-output \
+    --output-path ./output/
+```
+
+Using a configuration file (`sdnq_config.yaml`):
+
+```yaml
+model_path: "Disty0/Qwen-Image-Layered-SDNQ-uint4-svd-r32"
+prompt: "A beautiful landscape with mountains"
+height: 640
+width: 640
+num_inference_steps: 50
+seed: 777
+precision: "bf16"
+save_output: true
+output_path: "./output/"
+```
+
+Then run:
+
+```bash
+sglang generate --config sdnq_config.yaml
+```
+
+> [!NOTE]
+> The sdnq library must be installed (`pip install sdnq`) for SDNQ models to work.
+> SDNQ quantization is applied automatically when loading SDNQ-quantized checkpoints.
+
 
 ---
 
