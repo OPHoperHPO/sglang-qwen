@@ -69,6 +69,16 @@ def save_sdnq_model(model: ModelMixin, model_path: str, max_shard_size: str = "5
 def load_sdnq_model(model_path: str, model_cls: ModelMixin = None, file_name: str = None, dtype: torch.dtype = None, device: torch.device = "cpu", dequantize_fp32: bool = None, use_quantized_matmul: bool = None, model_config: dict = None, quantization_config: dict = None, load_method: str = "safetensors") -> ModelMixin:
     from accelerate import init_empty_weights
 
+    # Keys that are metadata and should not be passed to model constructor
+    METADATA_KEYS = {
+        "_class_name", "_diffusers_version", "_name_or_path", "architectures",
+        "quantization_config", "_transformers_version", "model_type"
+    }
+
+    def filter_model_config(config: dict) -> dict:
+        """Filter out metadata keys from config before passing to model constructor."""
+        return {k: v for k, v in config.items() if k not in METADATA_KEYS}
+
     with init_empty_weights():
         model_config_path = os.path.join(model_path, "config.json")
         quantization_config_path = os.path.join(model_path, "quantization_config.json")
@@ -157,14 +167,14 @@ def load_sdnq_model(model_path: str, model_cls: ModelMixin = None, file_name: st
                         config = model_cls.load_config(model_path)
                         model = model_cls.from_config(config)
                     else:
-                        model = model_cls(**model_config)
+                        model = model_cls(**filter_model_config(model_config))
             except Exception as e:
                 logger.warning(f"SDNQ: Failed to use sglang config pattern: {e}, falling back to standard init")
                 if hasattr(model_cls, "load_config") and hasattr(model_cls, "from_config"):
                     config = model_cls.load_config(model_path)
                     model = model_cls.from_config(config)
                 else:
-                    model = model_cls(**model_config)
+                    model = model_cls(**filter_model_config(model_config))
         elif hasattr(model_cls, "load_config") and hasattr(model_cls, "from_config"):
             config = model_cls.load_config(model_path)
             model = model_cls.from_config(config)
@@ -172,7 +182,7 @@ def load_sdnq_model(model_path: str, model_cls: ModelMixin = None, file_name: st
             config = transformers.AutoConfig.from_pretrained(model_path)
             model = model_cls(config)
         else:
-            model = model_cls(**model_config)
+            model = model_cls(**filter_model_config(model_config))
 
         model = sdnq_post_load_quant(model, torch_dtype=dtype, add_skip_keys=False, use_dynamic_quantization=False, **get_quant_args_from_config(quantization_config))
 
