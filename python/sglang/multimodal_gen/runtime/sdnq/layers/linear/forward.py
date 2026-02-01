@@ -17,4 +17,13 @@ def check_mats(input: torch.Tensor, weight: torch.Tensor) -> Tuple[torch.Tensor,
 
 
 def quantized_linear_forward(self, input: torch.FloatTensor) -> torch.FloatTensor:
-    return torch.nn.functional.linear(input, self.sdnq_dequantizer(self.weight, self.scale, self.zero_point, self.svd_up, self.svd_down), self.bias)
+    # Dequantize weights and ensure they match the input dtype
+    dequantized_weight = self.sdnq_dequantizer(self.weight, self.scale, self.zero_point, self.svd_up, self.svd_down)
+    # Cast to input dtype to avoid dtype mismatch (e.g., BFloat16 input vs Float32 weight)
+    if dequantized_weight.dtype != input.dtype:
+        dequantized_weight = dequantized_weight.to(dtype=input.dtype)
+    # Also ensure bias dtype matches if present
+    bias = self.bias
+    if bias is not None and bias.dtype != input.dtype:
+        bias = bias.to(dtype=input.dtype)
+    return torch.nn.functional.linear(input, dequantized_weight, bias)
