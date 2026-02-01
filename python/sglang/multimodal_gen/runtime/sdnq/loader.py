@@ -147,7 +147,7 @@ def load_sdnq_model(model_path: str, model_cls: ModelMixin = None, file_name: st
                 model_module = model_cls.__module__
                 try:
                     mod = __import__(model_module, fromlist=[model_cls.__name__])
-                    # Look for a config class with similar name
+                    # Look for a config class with similar name in the module's namespace
                     for attr_name in dir(mod):
                         if "Config" in attr_name and not attr_name.startswith("_"):
                             potential_config = getattr(mod, attr_name)
@@ -156,6 +156,26 @@ def load_sdnq_model(model_path: str, model_cls: ModelMixin = None, file_name: st
                                 break
                 except Exception:
                     pass
+
+            # If still not found, try to look up from known model-config mappings
+            if config_cls is None:
+                # Map of known model classes to their config classes
+                model_config_mapping = {
+                    "QwenImageTransformer2DModel": "sglang.multimodal_gen.configs.models.dits.qwenimage.QwenImageDitConfig",
+                    "HunyuanVideoTransformer3DModel": "sglang.multimodal_gen.configs.models.dits.hunyuanvideo.HunyuanVideoDiTConfig",
+                    "WanVideoTransformer3DModel": "sglang.multimodal_gen.configs.models.dits.wanvideo.WanVideoDitConfig",
+                    "FluxTransformer2DModel": "sglang.multimodal_gen.configs.models.dits.flux.FluxDitConfig",
+                }
+                model_name = model_cls.__name__
+                if model_name in model_config_mapping:
+                    try:
+                        config_path = model_config_mapping[model_name]
+                        module_path, class_name = config_path.rsplit(".", 1)
+                        config_module = __import__(module_path, fromlist=[class_name])
+                        config_cls = getattr(config_module, class_name)
+                        logger.info(f"SDNQ: Found config class {class_name} for {model_name} from mapping")
+                    except Exception as e:
+                        logger.warning(f"SDNQ: Failed to load config class from mapping: {e}")
 
             if config_cls is None:
                 raise ValueError(f"Cannot find config class for sglang model {model_cls.__name__}. "
