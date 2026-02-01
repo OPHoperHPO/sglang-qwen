@@ -326,6 +326,11 @@ def load_model_from_full_model_state_dict(
         """Check if a parameter is an SDNQ buffer (scale, zero_point, svd_up, svd_down)."""
         return any(param_name.endswith(pattern) for pattern in SDNQ_BUFFER_PATTERNS)
     
+    def _is_integer_dtype(dtype: torch.dtype) -> bool:
+        """Check if dtype is an integer type that cannot have gradients."""
+        return dtype in (torch.int8, torch.int16, torch.int32, torch.int64,
+                         torch.uint8, torch.bool)
+    
     def _get_sdnq_dtype(param_name: str, full_tensor: torch.Tensor) -> torch.dtype:
         """Get the appropriate dtype for SDNQ parameters."""
         # SDNQ weights are often int8/int4 packed, keep their original dtype
@@ -387,7 +392,12 @@ def load_model_from_full_model_state_dict(
             )
             if cpu_offload:
                 sharded_tensor = sharded_tensor.to("cpu")
-        sharded_sd[target_param_name] = nn.Parameter(sharded_tensor)
+        
+        # Integer tensors (from SDNQ quantization) cannot have requires_grad=True
+        # Also SDNQ buffers should not require gradients
+        requires_grad = not (_is_integer_dtype(sharded_tensor.dtype) or 
+                             (sdnq_enabled and _is_sdnq_buffer(target_param_name)))
+        sharded_sd[target_param_name] = nn.Parameter(sharded_tensor, requires_grad=requires_grad)
 
     model.reverse_param_names_mapping = reverse_param_names_mapping
     unused_keys = set(meta_sd.keys()) - set(sharded_sd.keys())
@@ -431,7 +441,9 @@ def load_model_from_full_model_state_dict(
             )
             if cpu_offload:
                 sharded_tensor = sharded_tensor.cpu()
-        sharded_sd[new_param_name] = nn.Parameter(sharded_tensor)
+        # SDNQ buffers should not require gradients
+        requires_grad = not (sdnq_enabled and _is_sdnq_buffer(new_param_name))
+        sharded_sd[new_param_name] = nn.Parameter(sharded_tensor, requires_grad=requires_grad)
 
     # choose `assign=True` since we cannot call `copy_` on meta tensor
     return model.load_state_dict(sharded_sd, strict=strict, assign=True)
