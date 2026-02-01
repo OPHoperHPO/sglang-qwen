@@ -837,11 +837,11 @@ class TransformerLoader(ComponentLoader):
         
         SDNQ loading strategy:
         1. Pre-quantized SDNQ models (detected via config.json quantization_config):
-           - Load weights normally using FSDP
-           - Apply SDNQ post-load quantization using config from file
+           - Use SDNQ loader which creates SDNQ structure first, then loads weights
+           - This handles quantized weight format (compressed) and extra buffers (scale, zero_point, svd_*)
         2. On-the-fly quantization (sdnq_enabled=True):
-           - Load model normally
-           - Apply SDNQ quantization with server_args settings
+           - Load model normally via FSDP
+           - Apply SDNQ quantization post-load with server_args settings
         """
 
         # Check if the model path contains pre-quantized SDNQ weights (in config.json)
@@ -849,12 +849,13 @@ class TransformerLoader(ComponentLoader):
         is_prequantized_sdnq = sdnq_config is not None
         
         if is_prequantized_sdnq:
-            logger.info(f"Detected pre-quantized SDNQ transformer at {component_model_path}")
-            logger.info(
-                f"SDNQ config: weights_dtype={sdnq_config.get('weights_dtype')}, "
-                f"use_svd={sdnq_config.get('use_svd')}, use_quantized_matmul={sdnq_config.get('use_quantized_matmul')}"
+            # Use SDNQ loader for pre-quantized models
+            # SDNQ loader: 1) creates model with empty weights, 2) applies SDNQ structure, 3) loads state dict
+            return self._load_prequantized_sdnq_transformer(
+                component_model_path, server_args, sdnq_config
             )
 
+        # Regular loading path for non-SDNQ or on-the-fly quantization
         config = get_diffusers_component_config(model_path=component_model_path)
         hf_config = deepcopy(config)
         cls_name = config.pop("_class_name")
@@ -936,63 +937,71 @@ class TransformerLoader(ComponentLoader):
 
         model = model.eval()
 
-        # Apply SDNQ quantization:
-        # 1. If pre-quantized SDNQ model detected, apply using config from file
-        # 2. If sdnq_enabled is True, apply on-the-fly quantization
-        if is_prequantized_sdnq:
-            model = self._apply_sdnq_from_config(model, sdnq_config, server_args, "transformer")
-        elif server_args.sdnq_enabled:
+        # Apply SDNQ on-the-fly quantization if enabled
+        if server_args.sdnq_enabled:
             model = self._apply_sdnq_quantization(model, server_args, "transformer")
 
         return model
 
-    def _apply_sdnq_from_config(
-        self,
-        model: nn.Module,
-        sdnq_config: dict,
-        server_args: ServerArgs,
-        module_name: str,
+    def _load_prequantized_sdnq_transformer(
+        self, component_model_path: str, server_args: ServerArgs, sdnq_config: dict
     ) -> nn.Module:
-        """Apply SDNQ quantization using config from a pre-quantized model."""
-        try:
-            from sglang.multimodal_gen.runtime.sdnq import sdnq_post_load_quant
-
-            weights_dtype = sdnq_config.get("weights_dtype", "int8")
-            use_svd = sdnq_config.get("use_svd", False)
-            svd_rank = sdnq_config.get("svd_rank", 32)
-            group_size = sdnq_config.get("group_size", 0)
-            use_quantized_matmul = sdnq_config.get("use_quantized_matmul", False)
-            dequantize_fp32 = sdnq_config.get("dequantize_fp32", False)
-            quant_conv = sdnq_config.get("quant_conv", False)
-            modules_to_not_convert = sdnq_config.get("modules_to_not_convert", [])
-
-            logger.info(
-                f"Applying SDNQ quantization to {module_name} from config "
-                f"(dtype={weights_dtype}, use_svd={use_svd}, svd_rank={svd_rank})"
-            )
-
-            quantized_model = sdnq_post_load_quant(
-                model,
-                weights_dtype=weights_dtype,
-                torch_dtype=torch.bfloat16,
-                group_size=group_size,
-                svd_rank=svd_rank,
-                use_svd=use_svd,
-                quant_conv=quant_conv,
-                use_quantized_matmul=use_quantized_matmul,
-                dequantize_fp32=dequantize_fp32,
-                non_blocking=True,
-                add_skip_keys=True,
-                modules_to_not_convert=modules_to_not_convert,
-            )
-
-            logger.info(f"SDNQ quantization applied to {module_name} from pre-quantized config")
-            return quantized_model
-
-        except Exception as e:
-            logger.warning(f"Failed to apply SDNQ quantization to {module_name}: {e}")
-            logger.warning("Continuing with unquantized model")
-            return model
+        """Load a pre-quantized SDNQ transformer using the SDNQ loader.
+        
+        Pre-quantized SDNQ models have:
+        - Weights in quantized/compressed format
+        - Extra buffers: scale, zero_point, svd_up, svd_down
+        
+        The SDNQ loader handles this by:
+        1. Creating model with empty weights
+        2. Applying SDNQ structure transformation (creates buffers)
+        3. Loading the pre-quantized state dict
+        """
+        from sglang.multimodal_gen.runtime.sdnq import load_sdnq_model
+        
+        logger.info(f"Loading pre-quantized SDNQ transformer from {component_model_path}")
+        logger.info(
+            f"SDNQ config: weights_dtype={sdnq_config.get('weights_dtype')}, "
+            f"use_svd={sdnq_config.get('use_svd')}, "
+            f"use_quantized_matmul={sdnq_config.get('use_quantized_matmul')}"
+        )
+        
+        # Determine target device based on CPU offload setting
+        if server_args.dit_cpu_offload:
+            target_device = torch.device("cpu")
+            logger.info("SDNQ: Loading transformer to CPU for offloading")
+        else:
+            target_device = get_local_torch_device()
+        
+        default_dtype = PRECISION_TO_TYPE.get(
+            server_args.pipeline_config.dit_precision, torch.bfloat16
+        )
+        
+        model = load_sdnq_model(
+            model_path=component_model_path,
+            dtype=default_dtype,
+            device=target_device,
+            dequantize_fp32=sdnq_config.get('dequantize_fp32', False),
+            use_quantized_matmul=sdnq_config.get('use_quantized_matmul', False),
+            quantization_config=sdnq_config,
+        )
+        
+        # Pin memory for efficient GPU transfer when using CPU offload
+        if server_args.dit_cpu_offload and server_args.pin_cpu_memory:
+            logger.info("SDNQ: Pinning CPU memory for transformer")
+            for param in model.parameters():
+                if param.device.type == "cpu" and not param.data.is_pinned():
+                    try:
+                        param.data = param.data.pin_memory()
+                    except Exception:
+                        pass  # Some tensors cannot be pinned
+        
+        server_args.model_paths["transformer"] = component_model_path
+        
+        total_params = sum(p.numel() for p in model.parameters())
+        logger.info(f"Loaded pre-quantized SDNQ transformer with {total_params / 1e9:.2f}B parameters")
+        
+        return model.eval()
 
     def _apply_sdnq_quantization(
         self,
