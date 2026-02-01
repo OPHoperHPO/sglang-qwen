@@ -133,48 +133,38 @@ def load_sdnq_model(model_path: str, model_cls: ModelMixin = None, file_name: st
 
         if sglang_model_init:
             # Use sglang's initialization pattern with config and hf_config
+            # sglang models ONLY accept (config, hf_config) - they cannot be initialized with direct kwargs
             from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import get_diffusers_component_config
             from copy import deepcopy
-            try:
-                config_dict = get_diffusers_component_config(model_path=model_path)
-                hf_config = deepcopy(config_dict)
+            
+            config_dict = get_diffusers_component_config(model_path=model_path)
+            hf_config = deepcopy(config_dict)
 
-                # Get the appropriate config class from the model class
-                config_cls = getattr(model_cls, "config_class", None)
-                if config_cls is None:
-                    # Try to find config class from model's module
-                    model_module = model_cls.__module__
-                    try:
-                        mod = __import__(model_module, fromlist=[model_cls.__name__])
-                        # Look for a config class with similar name
-                        for attr_name in dir(mod):
-                            if "Config" in attr_name and not attr_name.startswith("_"):
-                                potential_config = getattr(mod, attr_name)
-                                if hasattr(potential_config, "arch_config"):
-                                    config_cls = potential_config
-                                    break
-                    except Exception:
-                        pass
+            # Get the appropriate config class from the model class
+            config_cls = getattr(model_cls, "config_class", None)
+            if config_cls is None:
+                # Try to find config class from model's module
+                model_module = model_cls.__module__
+                try:
+                    mod = __import__(model_module, fromlist=[model_cls.__name__])
+                    # Look for a config class with similar name
+                    for attr_name in dir(mod):
+                        if "Config" in attr_name and not attr_name.startswith("_"):
+                            potential_config = getattr(mod, attr_name)
+                            if hasattr(potential_config, "arch_config"):
+                                config_cls = potential_config
+                                break
+                except Exception:
+                    pass
 
-                if config_cls is not None:
-                    dit_config = config_cls()
-                    dit_config.update_model_arch(config_dict)
-                    model = model_cls(config=dit_config, hf_config=hf_config)
-                    logger.info(f"SDNQ: Initialized model using sglang config pattern")
-                else:
-                    # Fallback to standard initialization
-                    if hasattr(model_cls, "load_config") and hasattr(model_cls, "from_config"):
-                        config = model_cls.load_config(model_path)
-                        model = model_cls.from_config(config)
-                    else:
-                        model = model_cls(**filter_model_config(model_config))
-            except Exception as e:
-                logger.warning(f"SDNQ: Failed to use sglang config pattern: {e}, falling back to standard init")
-                if hasattr(model_cls, "load_config") and hasattr(model_cls, "from_config"):
-                    config = model_cls.load_config(model_path)
-                    model = model_cls.from_config(config)
-                else:
-                    model = model_cls(**filter_model_config(model_config))
+            if config_cls is None:
+                raise ValueError(f"Cannot find config class for sglang model {model_cls.__name__}. "
+                                 f"sglang models require a config class with arch_config.")
+
+            dit_config = config_cls()
+            dit_config.update_model_arch(config_dict)
+            model = model_cls(config=dit_config, hf_config=hf_config)
+            logger.info(f"SDNQ: Initialized model using sglang config pattern")
         elif hasattr(model_cls, "load_config") and hasattr(model_cls, "from_config"):
             config = model_cls.load_config(model_path)
             model = model_cls.from_config(config)
