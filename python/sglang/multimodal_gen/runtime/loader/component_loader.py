@@ -110,6 +110,139 @@ def get_memory_usage_of_component(module) -> float | None:
     return round(usage, 2)
 
 
+def _is_sdnq_config(config: dict) -> bool:
+    """Check if a config dict represents an SDNQ quantization config.
+
+    SDNQ configs are identified by:
+    1. quant_method == "sdnq" (primary check)
+    2. Presence of weights_dtype AND sdnq_version fields (legacy SDNQ models)
+    """
+    if config is None:
+        return False
+    # Primary check: explicit quant_method
+    if config.get("quant_method") == "sdnq":
+        return True
+    # Legacy check: SDNQ models may have weights_dtype + sdnq_version without explicit quant_method
+    if "weights_dtype" in config and "sdnq_version" in config:
+        return True
+    return False
+
+
+def is_sdnq_quantized_model(model_path: str) -> bool:
+    """Check if a model directory contains pre-quantized SDNQ weights.
+
+    SDNQ quantized models have quantization_config in config.json with quant_method="sdnq".
+    """
+    if model_path is None:
+        return False
+
+    config_path = os.path.join(model_path, "config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            quant_config = config.get("quantization_config", None)
+            if _is_sdnq_config(quant_config):
+                return True
+        except (json.JSONDecodeError, IOError) as e:
+            logger.debug(f"Failed to read config.json at {config_path}: {e}")
+
+    # Also check for standalone quantization_config.json (legacy support)
+    quantization_config_path = os.path.join(model_path, "quantization_config.json")
+    if os.path.exists(quantization_config_path):
+        try:
+            with open(quantization_config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            if _is_sdnq_config(config):
+                return True
+        except (json.JSONDecodeError, IOError) as e:
+            logger.debug(f"Failed to read quantization_config.json at {quantization_config_path}: {e}")
+
+    return False
+
+
+def get_sdnq_config_from_model_path(model_path: str) -> dict | None:
+    """Extract SDNQ quantization config from model path.
+
+    Returns the quantization_config dict if found, None otherwise.
+    """
+    if model_path is None:
+        return None
+
+    config_path = os.path.join(model_path, "config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            quant_config = config.get("quantization_config", None)
+            if _is_sdnq_config(quant_config):
+                return quant_config
+        except (json.JSONDecodeError, IOError) as e:
+            logger.debug(f"Failed to read config.json at {config_path}: {e}")
+
+    # Also check for standalone quantization_config.json
+    quantization_config_path = os.path.join(model_path, "quantization_config.json")
+    if os.path.exists(quantization_config_path):
+        try:
+            with open(quantization_config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            if _is_sdnq_config(config):
+                return config
+        except (json.JSONDecodeError, IOError) as e:
+            logger.debug(f"Failed to read quantization_config.json at {quantization_config_path}: {e}")
+
+    return None
+
+
+def load_prequantized_sdnq_model(
+    model_path: str,
+    model_cls=None,
+    dtype: torch.dtype = None,
+    device: torch.device = None,
+    dequantize_fp32: bool = None,
+    use_quantized_matmul: bool = None,
+    quantization_config: dict = None,
+):
+    """Load a pre-quantized SDNQ model from disk.
+
+    Args:
+        model_path: Path to the pre-quantized SDNQ model directory.
+        model_cls: Model class to use (auto-detected if None).
+        dtype: Target dtype for the model.
+        device: Target device for the model.
+        dequantize_fp32: Whether to use FP32 for dequantization.
+        use_quantized_matmul: Whether to use quantized matmul.
+        quantization_config: Optional pre-extracted quantization config dict.
+
+    Returns:
+        The loaded and quantized model.
+    """
+    try:
+        from sglang.multimodal_gen.runtime.sdnq import load_sdnq_model
+
+        if device is None:
+            device = get_local_torch_device()
+
+        logger.info(f"Loading pre-quantized SDNQ model from {model_path}")
+
+        model = load_sdnq_model(
+            model_path=model_path,
+            model_cls=model_cls,
+            dtype=dtype,
+            device=device,
+            dequantize_fp32=dequantize_fp32,
+            use_quantized_matmul=use_quantized_matmul,
+            quantization_config=quantization_config,
+        )
+
+        logger.info(f"Successfully loaded pre-quantized SDNQ model from {model_path}")
+        return model
+
+    except Exception as e:
+        logger.error(f"Failed to load pre-quantized SDNQ model from {model_path}: {e}")
+        raise
+
+
 class ComponentLoader(ABC):
     """Base class for loading a specific type of model component."""
 
@@ -607,6 +740,26 @@ class VAELoader(ComponentLoader):
         self, component_model_path: str, server_args: ServerArgs, *args
     ):
         """Load the VAE based on the model path, and inference args."""
+
+        # Check if the model path contains pre-quantized SDNQ weights (in config.json)
+        sdnq_config = get_sdnq_config_from_model_path(component_model_path)
+        if sdnq_config is not None:
+            logger.info(f"Detected pre-quantized SDNQ VAE at {component_model_path}")
+            logger.info(
+                f"SDNQ config: weights_dtype={sdnq_config.get('weights_dtype')}, "
+                f"use_svd={sdnq_config.get('use_svd')}, use_quantized_matmul={sdnq_config.get('use_quantized_matmul')}"
+            )
+            model = load_prequantized_sdnq_model(
+                model_path=component_model_path,
+                dtype=PRECISION_TO_TYPE.get(server_args.pipeline_config.vae_precision, torch.bfloat16),
+                device=self.target_device(self.should_offload(server_args)),
+                dequantize_fp32=server_args.sdnq_dequantize_fp32,
+                use_quantized_matmul=server_args.sdnq_use_quantized_matmul,
+                quantization_config=sdnq_config,
+            )
+            server_args.model_paths["vae"] = component_model_path
+            return model.eval()
+
         config = get_diffusers_component_config(model_path=component_model_path)
         class_name = config.pop("_class_name", None)
         assert (
@@ -715,6 +868,26 @@ class TransformerLoader(ComponentLoader):
         self, component_model_path: str, server_args: ServerArgs, *args
     ):
         """Load the transformer based on the model path, and inference args."""
+
+        # Check if the model path contains pre-quantized SDNQ weights (in config.json)
+        sdnq_config = get_sdnq_config_from_model_path(component_model_path)
+        if sdnq_config is not None:
+            logger.info(f"Detected pre-quantized SDNQ transformer at {component_model_path}")
+            logger.info(
+                f"SDNQ config: weights_dtype={sdnq_config.get('weights_dtype')}, "
+                f"use_svd={sdnq_config.get('use_svd')}, use_quantized_matmul={sdnq_config.get('use_quantized_matmul')}"
+            )
+            model = load_prequantized_sdnq_model(
+                model_path=component_model_path,
+                dtype=PRECISION_TO_TYPE.get(server_args.pipeline_config.dit_precision, torch.bfloat16),
+                device=get_local_torch_device(),
+                dequantize_fp32=server_args.sdnq_dequantize_fp32,
+                use_quantized_matmul=server_args.sdnq_use_quantized_matmul,
+                quantization_config=sdnq_config,
+            )
+            server_args.model_paths["transformer"] = component_model_path
+            return model.eval()
+
         config = get_diffusers_component_config(model_path=component_model_path)
         hf_config = deepcopy(config)
         cls_name = config.pop("_class_name")

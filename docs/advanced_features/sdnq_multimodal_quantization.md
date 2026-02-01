@@ -11,8 +11,48 @@ SDNQ is designed specifically for diffusion and multimodal models, offering:
 - **Quantized matrix multiplication**: Optional INT8/FP8 matmul for faster inference
 - **SVDQuant support**: Optional SVD-based low-rank approximation for improved accuracy
 - **Module-level offloading**: RAM offloading for extremely limited VRAM scenarios
+- **Pre-quantized model loading**: Automatic detection and loading of pre-quantized SDNQ models
 
-## Quick Start
+## Loading Pre-Quantized SDNQ Models
+
+SGLang automatically detects and loads pre-quantized SDNQ models. When a model directory contains a `config.json` with `quantization_config` that has `quant_method: "sdnq"`, the model is loaded using the SDNQ loader.
+
+### Example config.json with SDNQ quantization:
+
+```json
+{
+  "_class_name": "QwenImageTransformer2DModel",
+  "quantization_config": {
+    "quant_method": "sdnq",
+    "weights_dtype": "uint4",
+    "use_svd": true,
+    "svd_rank": 32,
+    "use_quantized_matmul": false,
+    "modules_to_not_convert": ["norm_out", "img_in", "proj_out", "txt_in"]
+  }
+}
+```
+
+### Usage with Pre-Quantized Models
+
+Simply point to the pre-quantized model directory:
+
+```bash
+python -m sglang.launch_server \
+    --model-path /path/to/prequantized-qwen-image-layered \
+    --port 30000
+```
+
+No additional flags needed - SDNQ quantization is automatically detected from the config.
+
+### Pre-Quantized Models on HuggingFace
+
+You can find pre-quantized SDNQ models on HuggingFace:
+- [Disty0/sdnq collection](https://huggingface.co/collections/Disty0/sdnq)
+
+## On-the-fly Quantization
+
+If you don't have a pre-quantized model, you can enable on-the-fly SDNQ quantization:
 
 ### Basic Usage
 
@@ -49,7 +89,7 @@ python -m sglang.launch_server \
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--sdnq-enabled` | `false` | Enable SDNQ quantization |
+| `--sdnq-enabled` | `false` | Enable on-the-fly SDNQ quantization |
 | `--sdnq-weights-dtype` | `int8` | Target dtype for weights (int8, int4, uint4, fp8, etc.) |
 | `--sdnq-use-quantized-matmul` | `false` | Use INT8/FP8 quantized matrix multiplication |
 | `--sdnq-quant-conv` | `false` | Also quantize convolutional layers |
@@ -156,14 +196,42 @@ SDNQ supports the following weight data types:
 - `float8_e4m3fn`, `float8_e5m2`
 - Custom low-bit floats: `float7_*`, `float6_*`, `float5_*`, `float4_*`, `float3_*`, `float2_*`
 
+## Saving Quantized Models
+
+You can save quantized models for later loading:
+
+```python
+from sglang.multimodal_gen.runtime.sdnq import save_sdnq_model, sdnq_post_load_quant
+
+# Quantize a model
+quantized_model = sdnq_post_load_quant(
+    model,
+    weights_dtype="uint4",
+    use_svd=True,
+    svd_rank=32,
+)
+
+# Save the quantized model
+save_sdnq_model(quantized_model, "/path/to/save/quantized_model")
+```
+
+The saved model can then be loaded automatically by SGLang.
+
 ## Programmatic Usage
 
 You can also use SDNQ programmatically:
 
 ```python
-from sglang.multimodal_gen.runtime.sdnq import sdnq_post_load_quant, SDNQConfig
+from sglang.multimodal_gen.runtime.sdnq import sdnq_post_load_quant, load_sdnq_model, SDNQConfig
 
-# Apply SDNQ quantization to a model
+# Load a pre-quantized model
+model = load_sdnq_model(
+    model_path="/path/to/prequantized_model",
+    dtype=torch.bfloat16,
+    device="cuda",
+)
+
+# Or apply SDNQ quantization to an existing model
 quantized_model = sdnq_post_load_quant(
     model,
     weights_dtype="int8",
