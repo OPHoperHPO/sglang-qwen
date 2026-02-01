@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import torch
 from diffusers.models.modeling_utils import ModelMixin
 
@@ -7,6 +8,8 @@ from .common import dtype_dict, use_tensorwise_fp8_matmul, check_torch_compile, 
 from .quantizer import SDNQConfig, sdnq_post_load_quant, prepare_weight_for_matmul, prepare_svd_for_matmul, get_quant_args_from_config
 from .forward import get_forward_func
 from .file_loader import load_files
+
+logger = logging.getLogger("sdnq")
 
 
 def get_module_names(model: ModelMixin) -> list:
@@ -131,7 +134,12 @@ def load_sdnq_model(model_path: str, model_cls: ModelMixin = None, file_name: st
             if "model.embed_tokens.weight" in state_dict.keys():
                 state_dict["lm_head.weight"] = state_dict["model.embed_tokens.weight"]
 
-    model.load_state_dict(state_dict, assign=True)
+    # Load state dict with strict=False to handle extra/missing keys gracefully
+    load_result = model.load_state_dict(state_dict, assign=True, strict=False)
+    if load_result.missing_keys:
+        logger.warning(f"SDNQ: Missing keys when loading state dict: {load_result.missing_keys}")
+    if load_result.unexpected_keys:
+        logger.warning(f"SDNQ: Unexpected keys in state dict (ignored): {load_result.unexpected_keys}")
     del state_dict
 
     model = post_process_model(model)
