@@ -96,11 +96,76 @@ def load_sdnq_model(model_path: str, model_cls: ModelMixin = None, file_name: st
             if isinstance(class_name, list):
                 class_name = class_name[0]
             if class_name is not None:
-                model_cls = getattr(diffusers, class_name, None) or getattr(transformers, class_name, None)
+                # First try to resolve from sglang's ModelRegistry (for custom models like QwenImageTransformer2DModel)
+                try:
+                    from sglang.multimodal_gen.runtime.models.registry import ModelRegistry
+                    model_cls, _ = ModelRegistry.resolve_model_cls(class_name)
+                    logger.info(f"SDNQ: Resolved model class {class_name} from sglang ModelRegistry")
+                except Exception:
+                    # Fall back to diffusers/transformers
+                    model_cls = getattr(diffusers, class_name, None) or getattr(transformers, class_name, None)
+                    if model_cls is not None:
+                        logger.info(f"SDNQ: Resolved model class {class_name} from diffusers/transformers")
         if model_cls is None:
             raise ValueError(f"Cannot determine model class for {model_path}, please provide model_cls argument")
 
-        if hasattr(model_cls, "load_config") and hasattr(model_cls, "from_config"):
+        # Check if we need to use sglang's initialization (for models with custom config handling)
+        # sglang models use (config, hf_config) initialization pattern
+        sglang_model_init = False
+        try:
+            import inspect
+            init_sig = inspect.signature(model_cls.__init__)
+            params = list(init_sig.parameters.keys())
+            if "hf_config" in params:
+                sglang_model_init = True
+        except Exception:
+            pass
+
+        if sglang_model_init:
+            # Use sglang's initialization pattern with config and hf_config
+            from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import get_diffusers_component_config
+            from copy import deepcopy
+            try:
+                config_dict = get_diffusers_component_config(model_path=model_path)
+                hf_config = deepcopy(config_dict)
+
+                # Get the appropriate config class from the model class
+                config_cls = getattr(model_cls, "config_class", None)
+                if config_cls is None:
+                    # Try to find config class from model's module
+                    model_module = model_cls.__module__
+                    try:
+                        mod = __import__(model_module, fromlist=[model_cls.__name__])
+                        # Look for a config class with similar name
+                        for attr_name in dir(mod):
+                            if "Config" in attr_name and not attr_name.startswith("_"):
+                                potential_config = getattr(mod, attr_name)
+                                if hasattr(potential_config, "arch_config"):
+                                    config_cls = potential_config
+                                    break
+                    except Exception:
+                        pass
+
+                if config_cls is not None:
+                    dit_config = config_cls()
+                    dit_config.update_model_arch(config_dict)
+                    model = model_cls(config=dit_config, hf_config=hf_config)
+                    logger.info(f"SDNQ: Initialized model using sglang config pattern")
+                else:
+                    # Fallback to standard initialization
+                    if hasattr(model_cls, "load_config") and hasattr(model_cls, "from_config"):
+                        config = model_cls.load_config(model_path)
+                        model = model_cls.from_config(config)
+                    else:
+                        model = model_cls(**model_config)
+            except Exception as e:
+                logger.warning(f"SDNQ: Failed to use sglang config pattern: {e}, falling back to standard init")
+                if hasattr(model_cls, "load_config") and hasattr(model_cls, "from_config"):
+                    config = model_cls.load_config(model_path)
+                    model = model_cls.from_config(config)
+                else:
+                    model = model_cls(**model_config)
+        elif hasattr(model_cls, "load_config") and hasattr(model_cls, "from_config"):
             config = model_cls.load_config(model_path)
             model = model_cls.from_config(config)
         elif hasattr(model_cls, "_from_config"):
