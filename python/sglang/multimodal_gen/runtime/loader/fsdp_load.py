@@ -9,7 +9,7 @@
 import contextlib
 from collections.abc import Callable, Generator
 from itertools import chain
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from torch import nn
@@ -34,6 +34,9 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.utils import set_mixed_precision_policy
 
 logger = init_logger(__name__)
+
+# SDNQ buffer patterns that should be recognized during weight loading
+SDNQ_BUFFER_PATTERNS = [".scale", ".zero_point", ".svd_up", ".svd_down"]
 
 
 def _make_param_like(
@@ -90,9 +93,16 @@ def maybe_load_fsdp_model(
     output_dtype: torch.dtype | None = None,
     pin_cpu_memory: bool = True,
     strict: bool = True,
+    sdnq_config: Optional[dict] = None,
 ) -> torch.nn.Module:
     """
     Load the model with FSDP if is training, else load the model without FSDP.
+    
+    Args:
+        sdnq_config: Optional SDNQ quantization config. If provided, the model
+            will have SDNQ structure applied before loading weights. This is 
+            needed for loading pre-quantized SDNQ models where weights include
+            scale, zero_point, svd_up, svd_down buffers.
     """
     # NOTE(will): cast_forward_inputs=True shouldn't be needed as we are
     # manually casting the inputs to the model
@@ -109,6 +119,11 @@ def maybe_load_fsdp_model(
 
     with set_default_dtype(default_dtype), torch.device("meta"):
         model = model_cls(**init_params)
+        
+        # Apply SDNQ structure before loading weights if SDNQ config is provided
+        # This creates scale/zero_point/svd_up/svd_down buffers on each quantized layer
+        if sdnq_config is not None:
+            model = _apply_sdnq_structure(model, sdnq_config, default_dtype)
 
     # Check if we should use FSDP
     use_fsdp = fsdp_inference
@@ -152,6 +167,7 @@ def maybe_load_fsdp_model(
         strict=strict,
         cpu_offload=cpu_offload,
         param_names_mapping=param_names_mapping_fn,
+        sdnq_enabled=sdnq_config is not None,
     )
     for n, p in chain(model.named_parameters(), model.named_buffers()):
         if p.is_meta:
@@ -159,7 +175,51 @@ def maybe_load_fsdp_model(
         # Avoid unintended computation graph accumulation during inference
         if isinstance(p, torch.nn.Parameter):
             p.requires_grad = False
+    
+    # Post-process SDNQ model if needed
+    if sdnq_config is not None:
+        model = _post_process_sdnq_model(model)
+    
     return model
+
+
+def _apply_sdnq_structure(
+    model: nn.Module,
+    sdnq_config: dict,
+    torch_dtype: torch.dtype,
+) -> nn.Module:
+    """
+    Apply SDNQ structure to the model, creating scale/zero_point/svd_up/svd_down buffers.
+    
+    This function is called on a model on meta device, so it only creates the
+    buffer structure without actually allocating memory for weights.
+    """
+    from sglang.multimodal_gen.runtime.sdnq import sdnq_post_load_quant
+    from sglang.multimodal_gen.runtime.sdnq.quantizer import get_quant_args_from_config
+    
+    logger.info("Applying SDNQ structure to model for pre-quantized weight loading")
+    
+    quant_args = get_quant_args_from_config(sdnq_config)
+    
+    model = sdnq_post_load_quant(
+        model,
+        torch_dtype=torch_dtype,
+        add_skip_keys=False,
+        use_dynamic_quantization=False,
+        **quant_args
+    )
+    
+    return model
+
+
+def _post_process_sdnq_model(model: nn.Module) -> nn.Module:
+    """
+    Post-process SDNQ model after loading weights.
+    
+    This sets requires_grad=False and handles other post-load operations.
+    """
+    from sglang.multimodal_gen.runtime.sdnq.loader import post_process_model
+    return post_process_model(model)
 
 
 def shard_model(
@@ -235,6 +295,7 @@ def load_model_from_full_model_state_dict(
     strict: bool = False,
     cpu_offload: bool = False,
     param_names_mapping: Callable[[str], tuple[str, Any, Any]] | None = None,
+    sdnq_enabled: bool = False,
 ) -> _IncompatibleKeys:
     """
     Converting full state dict into a sharded state dict
@@ -247,6 +308,7 @@ def load_model_from_full_model_state_dict(
         strict (bool): flag to check if to load the model in strict mode
         cpu_offload (bool): flag to check if FSDP offload is enabled
         param_names_mapping (Optional[Callable[[str], str]]): a function that maps full param name to sharded param name
+        sdnq_enabled (bool): flag to indicate if SDNQ quantization is enabled for this model
     Returns:
         ``NamedTuple`` with ``missing_keys`` and ``unexpected_keys`` fields:
             * **missing_keys** is a list of str containing the missing keys
@@ -259,6 +321,21 @@ def load_model_from_full_model_state_dict(
     custom_param_sd, reverse_param_names_mapping = hf_to_custom_state_dict(
         full_sd_iterator, param_names_mapping
     )  # type: ignore
+    
+    def _is_sdnq_buffer(param_name: str) -> bool:
+        """Check if a parameter is an SDNQ buffer (scale, zero_point, svd_up, svd_down)."""
+        return any(param_name.endswith(pattern) for pattern in SDNQ_BUFFER_PATTERNS)
+    
+    def _get_sdnq_dtype(param_name: str, full_tensor: torch.Tensor) -> torch.dtype:
+        """Get the appropriate dtype for SDNQ parameters."""
+        # SDNQ weights are often int8/int4 packed, keep their original dtype
+        # SDNQ scale/zero_point/svd_* are typically float16/bfloat16
+        if _is_sdnq_buffer(param_name):
+            # Scale/zero_point/svd_* should be in param_dtype (bfloat16/float16)
+            return param_dtype
+        # Quantized weights should keep their original dtype
+        return full_tensor.dtype
+    
     for target_param_name, full_tensor in custom_param_sd.items():
         meta_sharded_param = meta_sd.get(target_param_name)
         if meta_sharded_param is None:
@@ -271,15 +348,27 @@ def load_model_from_full_model_state_dict(
                     f"Parameter '{target_param_name}' from checkpoint not found in model; skipping. This is expected for optional parameters."
                 )
                 continue
+        
         if not hasattr(meta_sharded_param, "device_mesh"):
-            full_tensor = full_tensor.to(device=device, dtype=param_dtype)
+            # For SDNQ models, handle quantized weights and buffers differently
+            if sdnq_enabled:
+                target_dtype = _get_sdnq_dtype(target_param_name, full_tensor)
+                full_tensor = full_tensor.to(device=device, dtype=target_dtype)
+            else:
+                full_tensor = full_tensor.to(device=device, dtype=param_dtype)
+            
             actual_param = param_dict.get(target_param_name)
             weight_loader = (
                 getattr(actual_param, "weight_loader", None)
                 if actual_param is not None
                 else None
             )
-            if weight_loader is not None:
+            
+            # For SDNQ, skip weight_loader for quantized weights (shapes may not match)
+            if sdnq_enabled and not _is_sdnq_buffer(target_param_name) and ".weight" in target_param_name:
+                # Quantized weight - use directly without weight_loader
+                sharded_tensor = full_tensor
+            elif weight_loader is not None:
                 assert actual_param is not None
                 sharded_tensor = torch.empty_like(
                     meta_sharded_param, device=device, dtype=param_dtype
@@ -306,7 +395,13 @@ def load_model_from_full_model_state_dict(
         logger.warning("Found unloaded parameters in meta state dict: %s", unused_keys)
 
     # List of allowed parameter name patterns
-    ALLOWED_NEW_PARAM_PATTERNS = ["gate_compress"]  # Can be extended as needed
+    # Include SDNQ buffer patterns when sdnq_enabled
+    ALLOWED_NEW_PARAM_PATTERNS = ["gate_compress"]
+    if sdnq_enabled:
+        # SDNQ buffers are allowed if they're in the model but not in checkpoint
+        # (this handles cases where some layers aren't quantized)
+        ALLOWED_NEW_PARAM_PATTERNS.extend(["scale", "zero_point", "svd_up", "svd_down"])
+    
     for new_param_name in unused_keys:
         if not any(pattern in new_param_name for pattern in ALLOWED_NEW_PARAM_PATTERNS):
             logger.error(

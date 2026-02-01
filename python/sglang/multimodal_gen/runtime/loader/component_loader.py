@@ -837,7 +837,7 @@ class TransformerLoader(ComponentLoader):
         
         SDNQ loading strategy:
         1. Pre-quantized SDNQ models (detected via config.json quantization_config):
-           - Use SDNQ loader which creates SDNQ structure first, then loads weights
+           - Pass SDNQ config to FSDP loader which applies SDNQ structure, then loads weights
            - This handles quantized weight format (compressed) and extra buffers (scale, zero_point, svd_*)
         2. On-the-fly quantization (sdnq_enabled=True):
            - Load model normally via FSDP
@@ -849,13 +849,14 @@ class TransformerLoader(ComponentLoader):
         is_prequantized_sdnq = sdnq_config is not None
         
         if is_prequantized_sdnq:
-            # Use SDNQ loader for pre-quantized models
-            # SDNQ loader: 1) creates model with empty weights, 2) applies SDNQ structure, 3) loads state dict
-            return self._load_prequantized_sdnq_transformer(
-                component_model_path, server_args, sdnq_config
+            logger.info(f"Detected pre-quantized SDNQ transformer at {component_model_path}")
+            logger.info(
+                f"SDNQ config: weights_dtype={sdnq_config.get('weights_dtype')}, "
+                f"use_svd={sdnq_config.get('use_svd')}, "
+                f"use_quantized_matmul={sdnq_config.get('use_quantized_matmul')}"
             )
 
-        # Regular loading path for non-SDNQ or on-the-fly quantization
+        # Common loading path for both regular and SDNQ models
         config = get_diffusers_component_config(model_path=component_model_path)
         hf_config = deepcopy(config)
         cls_name = config.pop("_class_name")
@@ -909,6 +910,7 @@ class TransformerLoader(ComponentLoader):
         )
 
         # Load the model using FSDP loader
+        # For pre-quantized SDNQ models, pass sdnq_config to apply SDNQ structure before loading weights
         assert server_args.hsdp_shard_dim is not None
         model = maybe_load_fsdp_model(
             model_cls=model_cls,
@@ -920,88 +922,30 @@ class TransformerLoader(ComponentLoader):
             cpu_offload=server_args.dit_cpu_offload,
             pin_cpu_memory=server_args.pin_cpu_memory,
             fsdp_inference=server_args.use_fsdp_inference,
-            # TODO(will): make these configurable
             default_dtype=default_dtype,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             output_dtype=None,
             strict=False,
+            sdnq_config=sdnq_config,  # Pass SDNQ config for pre-quantized models
         )
 
         total_params = sum(p.numel() for p in model.parameters())
         logger.info("Loaded model with %.2fB parameters", total_params / 1e9)
 
-        assert (
-            next(model.parameters()).dtype == default_dtype
-        ), "Model dtype does not match default dtype"
+        # For non-SDNQ models, check dtype matches (SDNQ models have mixed dtypes)
+        if not is_prequantized_sdnq:
+            assert (
+                next(model.parameters()).dtype == default_dtype
+            ), "Model dtype does not match default dtype"
 
         model = model.eval()
 
-        # Apply SDNQ on-the-fly quantization if enabled
-        if server_args.sdnq_enabled:
+        # Apply SDNQ on-the-fly quantization if enabled (for non-prequantized models)
+        if server_args.sdnq_enabled and not is_prequantized_sdnq:
             model = self._apply_sdnq_quantization(model, server_args, "transformer")
 
         return model
-
-    def _load_prequantized_sdnq_transformer(
-        self, component_model_path: str, server_args: ServerArgs, sdnq_config: dict
-    ) -> nn.Module:
-        """Load a pre-quantized SDNQ transformer using the SDNQ loader.
-        
-        Pre-quantized SDNQ models have:
-        - Weights in quantized/compressed format
-        - Extra buffers: scale, zero_point, svd_up, svd_down
-        
-        The SDNQ loader handles this by:
-        1. Creating model with empty weights
-        2. Applying SDNQ structure transformation (creates buffers)
-        3. Loading the pre-quantized state dict
-        """
-        from sglang.multimodal_gen.runtime.sdnq import load_sdnq_model
-        
-        logger.info(f"Loading pre-quantized SDNQ transformer from {component_model_path}")
-        logger.info(
-            f"SDNQ config: weights_dtype={sdnq_config.get('weights_dtype')}, "
-            f"use_svd={sdnq_config.get('use_svd')}, "
-            f"use_quantized_matmul={sdnq_config.get('use_quantized_matmul')}"
-        )
-        
-        # Determine target device based on CPU offload setting
-        if server_args.dit_cpu_offload:
-            target_device = torch.device("cpu")
-            logger.info("SDNQ: Loading transformer to CPU for offloading")
-        else:
-            target_device = get_local_torch_device()
-        
-        default_dtype = PRECISION_TO_TYPE.get(
-            server_args.pipeline_config.dit_precision, torch.bfloat16
-        )
-        
-        model = load_sdnq_model(
-            model_path=component_model_path,
-            dtype=default_dtype,
-            device=target_device,
-            dequantize_fp32=sdnq_config.get('dequantize_fp32', False),
-            use_quantized_matmul=sdnq_config.get('use_quantized_matmul', False),
-            quantization_config=sdnq_config,
-        )
-        
-        # Pin memory for efficient GPU transfer when using CPU offload
-        if server_args.dit_cpu_offload and server_args.pin_cpu_memory:
-            logger.info("SDNQ: Pinning CPU memory for transformer")
-            for param in model.parameters():
-                if param.device.type == "cpu" and not param.data.is_pinned():
-                    try:
-                        param.data = param.data.pin_memory()
-                    except Exception:
-                        pass  # Some tensors cannot be pinned
-        
-        server_args.model_paths["transformer"] = component_model_path
-        
-        total_params = sum(p.numel() for p in model.parameters())
-        logger.info(f"Loaded pre-quantized SDNQ transformer with {total_params / 1e9:.2f}B parameters")
-        
-        return model.eval()
 
     def _apply_sdnq_quantization(
         self,
