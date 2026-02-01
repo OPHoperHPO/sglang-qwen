@@ -749,14 +749,29 @@ class VAELoader(ComponentLoader):
                 f"SDNQ config: weights_dtype={sdnq_config.get('weights_dtype')}, "
                 f"use_svd={sdnq_config.get('use_svd')}, use_quantized_matmul={sdnq_config.get('use_quantized_matmul')}"
             )
+
+            should_offload = self.should_offload(server_args)
+            target_device = self.target_device(should_offload)
+
             model = load_prequantized_sdnq_model(
                 model_path=component_model_path,
                 dtype=PRECISION_TO_TYPE.get(server_args.pipeline_config.vae_precision, torch.bfloat16),
-                device=self.target_device(self.should_offload(server_args)),
+                device=target_device,
                 dequantize_fp32=server_args.sdnq_dequantize_fp32,
                 use_quantized_matmul=server_args.sdnq_use_quantized_matmul,
                 quantization_config=sdnq_config,
             )
+
+            # Pin memory for efficient GPU transfer when using CPU offload
+            if should_offload and server_args.pin_cpu_memory:
+                logger.info("SDNQ: Pinning CPU memory for VAE")
+                for param in model.parameters():
+                    if param.device.type == "cpu" and not param.data.is_pinned():
+                        try:
+                            param.data = param.data.pin_memory()
+                        except Exception:
+                            pass  # Some tensors cannot be pinned
+
             server_args.model_paths["vae"] = component_model_path
             return model.eval()
 
@@ -877,14 +892,33 @@ class TransformerLoader(ComponentLoader):
                 f"SDNQ config: weights_dtype={sdnq_config.get('weights_dtype')}, "
                 f"use_svd={sdnq_config.get('use_svd')}, use_quantized_matmul={sdnq_config.get('use_quantized_matmul')}"
             )
+
+            # Respect dit_cpu_offload setting - load to CPU if offloading is enabled
+            if server_args.dit_cpu_offload:
+                target_device = torch.device("cpu")
+                logger.info("SDNQ: Loading transformer to CPU for offloading")
+            else:
+                target_device = get_local_torch_device()
+
             model = load_prequantized_sdnq_model(
                 model_path=component_model_path,
                 dtype=PRECISION_TO_TYPE.get(server_args.pipeline_config.dit_precision, torch.bfloat16),
-                device=get_local_torch_device(),
+                device=target_device,
                 dequantize_fp32=server_args.sdnq_dequantize_fp32,
                 use_quantized_matmul=server_args.sdnq_use_quantized_matmul,
                 quantization_config=sdnq_config,
             )
+
+            # Pin memory for efficient GPU transfer when using CPU offload
+            if server_args.dit_cpu_offload and server_args.pin_cpu_memory:
+                logger.info("SDNQ: Pinning CPU memory for transformer")
+                for param in model.parameters():
+                    if param.device.type == "cpu" and not param.data.is_pinned():
+                        try:
+                            param.data = param.data.pin_memory()
+                        except Exception:
+                            pass  # Some tensors cannot be pinned
+
             server_args.model_paths["transformer"] = component_model_path
             return model.eval()
 
